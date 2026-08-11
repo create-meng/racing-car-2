@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OriginCar 启动控制台</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>OriginCar 启动控制台</h1>
+          <p>工作空间：{{ ros_ws }} ｜ 停车话题：{{ stop_topic }}</p>
+        </div>
+        <div class="toolbar">
+          <button class="emergency" data-action="emergency-stop">一键停车</button>
+          <button class="primary" data-action="start-all">一键启动</button>
+          <button class="danger" data-action="stop-all">全部停止</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>比赛运行</h2>
+        <div class="grid">
+          {% for item in grouped.run %}
+          <article class="service" data-key="{{ item.key }}">
+            <div>
+              <h3>{{ item.name }}</h3>
+              <p class="cmd">{{ item.cmd }}</p>
+              {% if item.ready_patterns %}
+              <p class="ready-patterns">完成关键词：{{ item.ready_patterns | join(" / ") }}</p>
+              {% endif %}
+            </div>
+            <span class="status">读取中</span>
+            <div class="actions">
+              <button data-action="start" data-key="{{ item.key }}">启动</button>
+              <button data-action="stop" data-key="{{ item.key }}">停止</button>
+              <button data-action="log" data-key="{{ item.key }}">日志</button>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>可选导航节点</h2>
+        <div class="grid compact">
+          {% for item in grouped.optional %}
+          <article class="service" data-key="{{ item.key }}">
+            <div>
+              <h3>{{ item.name }}</h3>
+              <p class="cmd">{{ item.cmd }}</p>
+              {% if item.ready_patterns %}
+              <p class="ready-patterns">完成关键词：{{ item.ready_patterns | join(" / ") }}</p>
+              {% endif %}
+            </div>
+            <span class="status">读取中</span>
+            <div class="actions">
+              <button data-action="start" data-key="{{ item.key }}">启动</button>
+              <button data-action="stop" data-key="{{ item.key }}">停止</button>
+              <button data-action="log" data-key="{{ item.key }}">日志</button>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>建图与调试</h2>
+        <div class="grid compact">
+          {% for item in grouped.map %}
+          <article class="service" data-key="{{ item.key }}">
+            <div>
+              <h3>{{ item.name }}</h3>
+              <p class="cmd">{{ item.cmd }}</p>
+              {% if item.ready_patterns %}
+              <p class="ready-patterns">完成关键词：{{ item.ready_patterns | join(" / ") }}</p>
+              {% endif %}
+            </div>
+            <span class="status">读取中</span>
+            <div class="actions">
+              <button data-action="start" data-key="{{ item.key }}">启动</button>
+              <button data-action="stop" data-key="{{ item.key }}">停止</button>
+              <button data-action="log" data-key="{{ item.key }}">日志</button>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel config-panel">
+        <div class="config-head">
+          <div>
+            <h2>导航参数</h2>
+            <p id="nav-config-path">{{ nav_config_path }}</p>
+          </div>
+          <div class="toolbar">
+            <button data-action="load-nav-config">重新加载</button>
+            <button class="primary" data-action="save-nav-config">保存到小车</button>
+          </div>
+        </div>
+        <textarea
+          id="nav-config-editor"
+          spellcheck="false"
+          placeholder="正在读取导航参数..."
+        ></textarea>
+        <div id="nav-config-message" class="message"></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="log-head">
+          <h2>日志</h2>
+          <span id="log-title">选择一个节点查看日志</span>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

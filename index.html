@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>阿克曼网页遥控器</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f4f4f9;
+            padding-top: 50px;
+        }
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .status {
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        .connected { color: green; }
+        .disconnected { color: red; }
+        .instructions {
+            text-align: left;
+            background: #eee;
+            padding: 15px;
+            border-radius: 5px;
+            display: inline-block;
+        }
+        .key-display {
+            font-size: 24px;
+            margin-top: 20px;
+            color: #333;
+            height: 30px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>?? 阿克曼键盘网页控制端</h2>
+    <div id="status" class="status disconnected">未连接到 ROS 2 后端</div>
+    
+    <div class="instructions">
+        <strong>操作指南：</strong><br>
+        ? <b>W / S</b> : 前进 / 后退 (基础线速度)<br>
+        ? <b>A / D</b> : 按住向左 / 向右转向 (角度累积)<br>
+        ? <b>P</b> : 急停 (速度归零)<br>
+        <span style="color: #666; font-size: 12px;">提示：请确保点击了网页激活焦点后再按键。</span>
+    </div>
+
+    <div class="key-display" id="keyDisplay">当前按键: 无</div>
+</div>
+
+<script>
+    // 如果 ROS 运行在其他电脑，请把 localhost 改为对应的 ROS 电脑 IP
+    const ros_ip = "localhost"; 
+    const ws = new WebSocket(`ws://${ros_ip}:8765`);
+    
+    const statusDiv = document.getElementById('status');
+    const keyDisplay = document.getElementById('keyDisplay');
+    
+    // 记录当前按下的键，防止重复触发 keydown
+    let activeKeys = new Set();
+
+    ws.onopen = () => {
+        statusDiv.innerText = "已成功连接到 ROS 2 后端";
+        statusDiv.className = "status connected";
+    };
+
+    ws.onclose = () => {
+        statusDiv.innerText = "与后端断开连接";
+        statusDiv.className = "status disconnected";
+    };
+
+    // 监听键盘按下
+    window.addEventListener('keydown', (e) => {
+        const key = e.key.toLowerCase();
+        if (['w', 'a', 's', 'd', 'p'].includes(key) && !activeKeys.has(key)) {
+            activeKeys.add(key);
+            updateDisplay();
+            // 发送给 ROS
+            ws.send(JSON.stringify({ type: 'keydown', key: key }));
+        }
+    });
+
+    // 监听键盘松开
+    window.addEventListener('keyup', (e) => {
+        const key = e.key.toLowerCase();
+        if (activeKeys.has(key)) {
+            activeKeys.delete(key);
+            updateDisplay();
+            // 发送给 ROS
+            ws.send(JSON.stringify({ type: 'keyup', key: key }));
+        }
+    });
+
+    function updateDisplay() {
+        if (activeKeys.size === 0) {
+            keyDisplay.innerText = "当前按键: 无";
+        } else {
+            keyDisplay.innerText = "当前按键: " + Array.from(activeKeys).join(' + ').toUpperCase();
+        }
+    }
+</script>
+</body>
+</html>

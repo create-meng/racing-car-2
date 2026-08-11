@@ -1,0 +1,317 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --text: #152033;
+  --muted: #68758a;
+  --border: #dce4ef;
+  --primary: #1d7afc;
+  --primary-dark: #0f5ed1;
+  --danger: #dc3f4d;
+  --running: #0e9f6e;
+  --stopped: #7a8597;
+  --exited: #c27803;
+  --shadow: 0 16px 40px rgba(24, 36, 56, 0.10);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 36px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: 18px;
+  margin-bottom: 14px;
+}
+
+h3 {
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.topbar p,
+.cmd,
+.ready-patterns,
+#log-title {
+  color: var(--muted);
+}
+
+.topbar p {
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.toolbar,
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 7px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #b9c7d9;
+  background: #f9fbff;
+}
+
+button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: var(--primary-dark);
+}
+
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+button.emergency {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+  font-weight: 700;
+}
+
+button.emergency:hover {
+  border-color: #b72e3c;
+  background: #b72e3c;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+  margin-top: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.grid.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.service {
+  min-height: 120px; /* 原 158px，更紧凑 */
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px; /* 原 14px，更紧凑 */
+  background: #fbfdff;
+}
+
+.cmd {
+  display: none !important; /* ? 隐藏命令行（图二内容） */
+}
+
+.ready-patterns {
+  display: none !important; /* ? 隐藏完成关键词提示 */
+}
+
+.status {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: var(--stopped);
+  font-size: 12px;
+}
+
+.status.running {
+  background: #e7f8f1;
+  color: var(--running);
+}
+
+.status.starting {
+  background: #eef4ff;
+  color: var(--primary);
+}
+
+.status.ready {
+  background: #e7f8f1;
+  color: var(--running);
+}
+
+.status.exited {
+  background: #fff7e6;
+  color: var(--exited);
+}
+
+.config-head,
+.log-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.config-head {
+  align-items: flex-start;
+}
+
+.log-head h2 {
+  margin-bottom: 0;
+}
+
+#nav-config-path {
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+#nav-config-editor {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  color: #111827;
+  background: #fbfdff;
+  font-family: Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+#nav-config-editor:focus {
+  border-color: var(--primary);
+  outline: 2px solid rgba(29, 122, 252, 0.18);
+}
+
+.message {
+  min-height: 22px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.message.success {
+  color: var(--running);
+}
+
+.message.error {
+  color: var(--danger);
+}
+
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 20;
+  max-width: min(420px, calc(100% - 44px));
+  padding: 14px 16px;
+  border: 1px solid #bde8d2;
+  border-radius: 8px;
+  background: #e7f8f1;
+  box-shadow: var(--shadow);
+  color: var(--running);
+  font-size: 14px;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#log {
+  min-height: 240px;
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border-radius: 8px;
+  background: #111827;
+  color: #d1d5db;
+  font-family: Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 840px) {
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .config-head {
+    flex-direction: column;
+  }
+
+  .grid,
+  .grid.compact {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ? 可选：隐藏顶部工作空间/停车话题提示（如需保留可删除此段） */
+.topbar > p {
+  display: none !important;
+}

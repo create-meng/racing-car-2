@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OriginCar 启动控制台</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>OriginCar 启动控制台</h1>
+          <p>工作空间：{{ ros_ws }} ｜ 停车话题：{{ stop_topic }}</p>
+        </div>
+        <div class="toolbar">
+          <button class="emergency" data-action="emergency-stop">一键停车</button>
+          <button class="primary" data-action="start-all">一键启动</button>
+          <button class="danger" data-action="stop-all">全部停止</button>
+        </div>
+      </header>
+
+      {% for group in command_groups %}
+      <section class="panel">
+        <h2>{{ group.label }}</h2>
+        <div class="grid {{ group.layout }}">
+          {% for item in group.commands %}
+          <article
+            class="service"
+            data-key="{{ item.key }}"
+            {% if item.confirm %}data-confirm-start="{{ item.confirm | e }}"{% endif %}
+          >
+            <div>
+              <h3>{{ item.name }}</h3>
+              <p class="cmd">{{ item.cmd }}</p>
+              {% if item.ready_patterns %}
+              <p class="ready-patterns">完成关键词：{{ item.ready_patterns | join(" / ") }}</p>
+              {% endif %}
+            </div>
+            <span class="status">读取中</span>
+            <div class="actions">
+              <button data-action="start" data-key="{{ item.key }}">
+                {% if item.oneshot %}执行{% else %}启动{% endif %}
+              </button>
+              {% if not item.oneshot %}
+              <button data-action="stop" data-key="{{ item.key }}">停止</button>
+              {% endif %}
+              <button data-action="log" data-key="{{ item.key }}">日志</button>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endfor %}
+
+      <section class="panel config-panel">
+        <div class="config-head">
+          <div>
+            <h2>小车文件</h2>
+            <p id="config-file-path">{{ editable_files[0].path }}</p>
+          </div>
+          <div class="toolbar">
+            <select id="config-file-select" aria-label="选择文件">
+              {% for file in editable_files %}
+              <option value="{{ file.key }}">{{ file.name }}</option>
+              {% endfor %}
+            </select>
+            <button data-action="load-config-file">重新加载</button>
+            <button class="primary" data-action="save-config-file">保存到小车</button>
+          </div>
+        </div>
+        <textarea
+          id="config-file-editor"
+          spellcheck="false"
+          placeholder="正在读取文件..."
+        ></textarea>
+        <div id="config-file-message" class="message"></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="log-head">
+          <h2>日志</h2>
+          <span id="log-title">选择一个节点查看日志</span>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
