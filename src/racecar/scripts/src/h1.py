@@ -151,7 +151,7 @@ class NavThroughPosesClient(Node):
         # 无论是第一阶段正常走完，还是被二维码中断取消，都会触发到这里
         if self.qr_result is None:
             self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别...")
-            for i in range(30):
+            for i in range(100):
                 if self.qr_result is not None:
                     break
                 rclpy.spin_once(self, timeout_sec=0.1)
