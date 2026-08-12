@@ -37,7 +37,7 @@ amcl:
     save_pose_rate: 0.5
     sigma_hit: 0.02
     tf_broadcast: true
-    transform_tolerance: 0.3
+    transform_tolerance: 0.5
     update_min_a: 0.2
     update_min_d: 0.2
     z_hit: 0.7
@@ -45,8 +45,8 @@ amcl:
     z_short: 0.24
     scan_topic: /scan
     set_initial_pose: true
-    initial_pose.x: 0.0
-    initial_pose.y: 0.0
+    initial_pose.x: 0.5
+    initial_pose.y: 0.2
     initial_pose.z: 0.0
     initial_pose.yaw: 0.0
 
@@ -107,7 +107,7 @@ controller_server:
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
       
-      model_dt: 0.15                      # 每步预测时间对齐为 0.1s
+      model_dt: 0.1                      # 每步预测时间对齐为 0.1s
       time_steps: 25                     # 预测前瞻步数降为 20 步
       
       batch_size: 800                    # 每次撒出的预测轨迹数
@@ -194,7 +194,7 @@ local_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.4                          
+        inflation_radius: 0.25                          
         cost_scaling_factor: 12.0                        
 
       obstacle_layer:
@@ -237,7 +237,7 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.4                          
+        inflation_radius: 0.25                          
         cost_scaling_factor: 12.0                        
 
       static_layer:
@@ -337,7 +337,7 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 20.0
-    behavior_plugins: ["backup", "drive_on_heading", "wait"] 
+    behavior_plugins: ["backup", "drive_on_heading", "wait", "spin"] 
 
     backup:
       plugin: "nav2_behaviors/BackUp"
@@ -345,6 +345,8 @@ behavior_server:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:
       plugin: "nav2_behaviors/Wait"
+    spin:
+      plugin: "nav2_behaviors/Spin"
 
     global_frame: odom_combined
     robot_base_frame: base_footprint
