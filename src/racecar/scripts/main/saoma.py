@@ -37,14 +37,14 @@ class QRDecoderNode(Node):
         # 杀死旧进程后再打开摄像头
         self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
 
         if not self.cap.isOpened():
             self.get_logger().error("无法打开摄像头")
             return
 
-        self.get_logger().info("开始检测... (1920x1280)")
+        self.get_logger().info("开始检测... (1920x1080)")
         self.run_detection()
 
     def kill_pub_image(self):
