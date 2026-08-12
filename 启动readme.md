@@ -1,3 +1,5 @@
+cd /root/ros2_ws/
+source install/setup.bash
 ros2 launch origincar_base origincar_bringup.launch.py #启动底盘
 
 cd /root/ros2_ws/

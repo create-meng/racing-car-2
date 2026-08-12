@@ -37,34 +37,21 @@ def generate_launch_description():
             package='tf2_ros', 
             executable='static_transform_publisher', 
             name='base_to_link',
-            arguments=[
-                '--x', '0.41', '--y', '0.12', '--z', '0.0',
-                '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
-                '--frame-id', 'base_footprint', '--child-frame-id', 'base_link',
-            ],
+            arguments=['0.0', '0.0', '0','0', '0','0','base_footprint','base_link'],
     )
     base_to_gyro = launch_ros.actions.Node(
             package='tf2_ros', 
             executable='static_transform_publisher', 
             name='base_to_gyro',
-            arguments=[
-                '--x', '0.0', '--y', '0.0', '--z', '0.0',
-                '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
-                '--frame-id', 'base_footprint', '--child-frame-id', 'gyro_link',
-            ],
+            arguments=['0', '0', '0','0', '0','0','base_footprint','gyro_link'],
     )
     
+    # ? 正确：雷达 frame_id = laser，所以发布到 laser
     link_to_laser = launch_ros.actions.Node(
             package='tf2_ros', 
             executable='static_transform_publisher', 
             name='link_to_laser',
-            arguments=[
-                # Keep the model's base_footprint -> base_link offset, while
-                # placing the physical lidar at the base_footprint origin.
-                '--x', '-0.41', '--y', '-0.12', '--z', '0.0',
-                '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
-                '--frame-id', 'base_link', '--child-frame-id', 'laser',
-            ],
+            arguments=['0', '0', '0.2','0', '0','0','base_link','laser'],
     )
 
     imu_filter_node =  launch_ros.actions.Node(
@@ -73,11 +60,11 @@ def generate_launch_description():
         parameters=[imu_config]
     )
     
+    # ========== 我在这里帮你修改了 ==========
     robot_ekf = launch_ros.actions.Node(
-            condition=UnlessCondition(carto_slam),
+            # condition=UnlessCondition(carto_slam),  # 已注释，EKF 永远运行
             package='robot_localization', 
             executable='ekf_node', 
-            name='ekf_filter_node',
             parameters=[ekf_config],
             remappings=[("odometry/filtered", "odom_combined")]
             )
@@ -97,7 +84,7 @@ def generate_launch_description():
     ld.add_action(joint_state_publisher_node)
     ld.add_action(choose_car)
     ld.add_action(imu_filter_node)
-    ld.add_action(link_to_laser)
     ld.add_action(robot_ekf)
+    ld.add_action(link_to_laser)
 
     return ld

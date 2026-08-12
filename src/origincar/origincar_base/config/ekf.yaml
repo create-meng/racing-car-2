@@ -4,12 +4,12 @@ ekf_filter_node:
 # The frequency, in Hz, at which the filter will output a position estimate. Note that the filter will not begin
 # computation until it receives at least one message from one of the inputs. It will then run continuously at the
 # frequency specified here, regardless of whether it receives more measurements. Defaults to 30 if unspecified.
-        frequency: 6.0
+        frequency: 30.0
 
 # The period, in seconds, after which we consider a sensor to have timed out. In this event, we carry out a predict
 # cycle on the EKF without correcting it. This parameter can be thought of as the minimum frequency with which the
 # filter will generate new output. Defaults to 1 / frequency if not specified.
-        sensor_timeout: 0.5
+        sensor_timeout: 2.0
 
 # ekf_localization_node and ukf_localization_node both use a 3D omnidirectional motion model. If this parameter is
 # set to true, no 3D information will be used in your state estimate. Use this if you are operating in a planar
@@ -40,11 +40,6 @@ ekf_filter_node:
 
 # Whether to broadcast the transformation over the /tf topic. Defaults to true if unspecified.
         publish_tf: true
-# Never republish a corrected state at an old sensor timestamp.  A delayed
-# serial/IMU sample must be rejected by the time gate instead of rewriting the
-# already published odom->base transform and making map pose jump backwards.
-        permit_corrected_publication: false
-        reset_on_time_jump: true
 
 # Whether to publish the acceleration state. Defaults to false if unspecified.
         publish_acceleration: false
@@ -86,19 +81,15 @@ ekf_filter_node:
 # do not provide some of the state variables estimated by the filter. For example, a TwistWithCovarianceStamped message
 # has no pose information, so the first six values would be meaningless in that case. Each vector defaults to all false
 # if unspecified, effectively making this parameter required for each sensor.
-        # 底盘 /odom 的 pose.x/y 是以 Robot_Vel.Z 积分得出；该角速度与
-        # /imu/data 的真实航向会显著偏离，不能作为世界坐标观测，也不能融合
-        # 其 yaw-rate。只融合车体系 vx/vy 速度，由 EKF 在 IMU yaw 约束下
-        # 积分 odom_combined 的 xy；Ackermann 车的 vy=0 约束同时抑制侧向漂移。
-        odom0_config: [false, false, false,
+        odom0_config: [true, false, false,
                        false, false, false,
                        true,  true,  false,
-                       false, false, false,
+                       false, false, true,
                        false, false, false]
 
 # If you have high-frequency data or are running with a low frequency parameter value, then you may want to increase
 # the size of the subscription queue so that more measurements are fused.
-        odom0_queue_size: 1
+        odom0_queue_size: 10
 
 # [ADVANCED] Large messages in ROS can exhibit strange behavior when they arrive at a high frequency. This is a result
 # of Nagle's algorithm. This option tells the ROS subscriber to use the tcpNoDelay option, which disables Nagle's
@@ -113,9 +104,7 @@ ekf_filter_node:
 # data is converted to velocity data by differentiating the absolute pose measurements. These velocities are then
 # integrated as usual. NOTE: this only applies to sensors that provide pose measurements; setting differential to true
 # for twist measurements has no effect.
-        # 当前只融合 twist.vx，differential 对该速度观测没有作用；保留 false，
-        # 明确禁止未来将错误的 /odom pose.x/y 差分后重新接入。
-        odom0_differential: false
+        odom0_differential: true
 
 # [ADVANCED] When the node starts, if this parameter is true, then the first measurement is treated as a "zero point"
 # for all future measurements. While you can achieve the same effect with the differential paremeter, the key
@@ -132,13 +121,9 @@ ekf_filter_node:
 #         odom0_pose_rejection_threshold: 5.0
 #         odom0_twist_rejection_threshold: 1.0
 
-        imu0: /imu/data
-        # 不融合 Madgwick 的 orientation yaw：当前 IMU 没有磁力计，
-        # 该字段是无绝对参考的积分结果。只融合 angular_velocity.z，
-        # 让 odom_combined 保持连续短时运动；全局 yaw 由雷达墙线校正的
-        # map->odom_combined / map_heading_lidar 提供。
+        imu0: /imu/data_raw
         imu0_config: [false, false, false,
-                      false, false, false,
+                      false, false, true,
                       false, false, false,
                       false, false, true,
                       false,  false, false]
@@ -146,7 +131,7 @@ ekf_filter_node:
         imu0_nodelay: false
         imu0_differential: false
         imu0_relative: true
-        imu0_queue_size: 1
+        imu0_queue_size: 10
         imu0_pose_rejection_threshold: 20.0                 # Note the difference in parameter names
         imu0_twist_rejection_threshold: 1.542                #
         imu0_linear_acceleration_rejection_threshold: 10.0  #
@@ -228,3 +213,4 @@ ekf_filter_node:
                                       0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     1e-9, 0.0,    0.0,
                                       0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    1e-9, 0.0,
                                       0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,     0.0,    0.0,    1e-9]
+

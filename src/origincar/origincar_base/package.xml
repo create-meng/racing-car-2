@@ -19,7 +19,6 @@
   <build_depend>tf2_geometry_msgs</build_depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
-  <exec_depend>racing_common</exec_depend>
   <depend>ament_index_cpp</depend>
   <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>

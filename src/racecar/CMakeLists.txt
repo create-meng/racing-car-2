@@ -102,6 +102,10 @@ install(PROGRAMS
     scripts/zhuitong.py 
     DESTINATION lib/${PROJECT_NAME}
 )
+install(PROGRAMS
+    scripts/read_pose.py
+    DESTINATION lib/${PROJECT_NAME}
+)
 install(DIRECTORY
   config
   DESTINATION share/${PROJECT_NAME}

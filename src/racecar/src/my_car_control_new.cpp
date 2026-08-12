@@ -5,7 +5,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <vector>
 #include <cmath>
 #include <iostream>
@@ -114,7 +114,7 @@ void MyCarControl::GetPoint(const geometry_msgs::msg::Pose2D::SharedPtr msg)
         RCLCPP_INFO(this->get_logger(),"输出PID_dir.error_line为：%f\n",PID_dir.error_line);
 
         cmd_vel.angular.z = 90 + PID_dir.out_line + PID_dir.out_angle;
-        RCLCPP_INFO(this->get_logger(),"输出角度为：%d\n",cmd_vel.angular.z);
+        RCLCPP_INFO(this->get_logger(),"输出角度为：%f\n",cmd_vel.angular.z);
 
         if (PID_dir.error_angle > angle_protect)
         {

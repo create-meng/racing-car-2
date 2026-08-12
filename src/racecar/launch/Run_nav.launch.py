@@ -35,12 +35,7 @@ def generate_launch_description():
             'params',
             default_value=param_file,
             description='Full path to param file to load'),
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            arguments=['0.05', '0.0', '0.15', '0.0', '0.0', '0.0', 'laser', 'base_footprint'],
-            name='laser_to_base_footprint',
-        ),
+        
 
         Node(
             name='waypoint_cycle',

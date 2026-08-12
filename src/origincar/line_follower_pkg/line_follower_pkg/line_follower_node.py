@@ -13,9 +13,9 @@ class LineFollower(Node):
 
         self.camera_topic = '/image'
         self.cmd_vel_topic = '/cmd_vel'
-        self.linear_speed = 0.2
+        self.linear_speed = 0.5
         self.max_angular_speed = 1.0
-        self.kp = 0.005 
+        self.kp = 0.002 
 
 
         self.target_fps = 15.0 

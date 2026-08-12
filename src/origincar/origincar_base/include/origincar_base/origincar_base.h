@@ -8,10 +8,6 @@
 #include "std_msgs/msg/string.hpp"
 #include <csignal>
 #include <thread>
-#include <chrono>
-#include <mutex>
-#include <vector>
-#include <algorithm>
 
 #include <iostream>
 #include <string.h>
@@ -52,8 +48,9 @@ using namespace std;
 #define SEND_DATA_SIZE    11         //The length of data sent by ROS to the lower machine //ROS向下位机发送的数据的长度
 #define PI 				  3.1415926f //PI //圆周率
 
-// Receive frame: [0] header, [1] flag, [2:7] vx/vy/wz, [8:13] accel xyz,
-// [14:19] gyro xyz, [20:21] voltage, [22] XOR, [23] tail.
+#define GYROSCOPE_RATIO   0.00026644f
+
+#define ACCEl_RATIO 	  1671.84f
 
 extern sensor_msgs::msg::Imu Mpu6050;
 
@@ -147,12 +144,9 @@ private:
 
 	void Publish_ImuSensor();
 	void Publish_Voltage();
-	void Send_Stop_Command();
-	void Check_Cmd_Vel_Watchdog();
 	auto createQuaternionMsgFromYaw(double yaw);
 
 	bool Get_Sensor_Data();
-	void Update_Imu_Gyro_Calibration();
 	unsigned char Check_Sum(unsigned char Count_Number,unsigned char mode);
 	short IMU_Trans(uint8_t Data_High,uint8_t Data_Low);
 	float Odom_Trans(uint8_t Data_High,uint8_t Data_Low);
@@ -200,32 +194,7 @@ private:
 	Vel_Pos_Data Robot_Vel;
 	MPU6050_DATA Mpu6050_Data;
 	float Power_voltage;
-    size_t count_ = 0;
-    size_t invalid_frame_count_ = 0;
-	bool cmd_vel_watchdog_enabled_;
-	double cmd_vel_watchdog_timeout_sec_;
-	int serial_idle_sleep_ms_;
-	std::mutex cmd_state_mutex_;
-	std::mutex serial_mutex_;
-	std::vector<uint8_t> serial_rx_buffer_;
-	bool last_cmd_nonzero_;
-	std::chrono::steady_clock::time_point last_cmd_received_at_;
-	double imu_gyro_scale_rad_s_per_lsb_;
-	double imu_accel_scale_lsb_per_mps2_;
-	double imu_gyro_bias_z_rad_s_;
-	double odom_velocity_scale_mps_per_lsb_;
-	double odom_world_x_scale_;
-	double odom_world_y_scale_;
-	double odom_max_integration_dt_sec_;
-	double odom_max_valid_speed_mps_;
-	double voltage_scale_v_per_lsb_;
-	bool imu_gyro_auto_calibration_enabled_;
-	int imu_gyro_calibration_samples_;
-	double imu_gyro_calibration_max_speed_mps_;
-	double imu_gyro_calibration_max_yaw_rate_rad_s_;
-	double imu_gyro_bias_sum_rad_s_;
-	int imu_gyro_calibration_count_;
-	bool imu_gyro_calibrated_;
+    size_t count_;
 };
 
 

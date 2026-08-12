@@ -66,9 +66,7 @@ void LidarProcessor::LidarCallback(const sensor_msgs::msg::LaserScan::SharedPtr 
     float zuixiao_R = std::numeric_limits<float>::max(); // 右侧最小距离
     int zhaodao_L = 0; // 是否找到左侧目标
     int zhaodao_R = 0; // 是否找到右侧目标
-    int flag = 0; // 标志变量，表示是否找到目标
     int jiaodu_L; // 左侧目标角度
-    int jiaodu_R; // 右侧目标角度
     float Pi = 3.1415926; // 圆周率
     float sina; // 正弦值
     float dajiao; // 打角值
@@ -117,8 +115,7 @@ void LidarProcessor::LidarCallback(const sensor_msgs::msg::LaserScan::SharedPtr 
             {
                 zuixiao_R = fMidDist;
                 zhaodao_R = 1;
-                jiaodu_R = i;
-                flag = 0;
+                // jiaodu_R = i;  // 变量未使用，已注释
             }
         }
     }
@@ -137,8 +134,6 @@ void LidarProcessor::LidarCallback(const sensor_msgs::msg::LaserScan::SharedPtr 
             ztjs_L = ztjs_L + 1;
         }
         oldjiaodu_L = jiaodu_L; // 更新角度
-        flag = 1; // 标记找到目标
-
         // 打印左侧目标信息
         RCLCPP_INFO(this->get_logger(), "左角度：%.1f 左距离：%.1f 打角：%d 速度：%d ztjs:  %d", 
                     jiaodu_L * 0.36, zuixiao_L, static_cast<int>(dajiao), speed, ztjs_L);
@@ -158,7 +153,6 @@ void LidarProcessor::LidarCallback(const sensor_msgs::msg::LaserScan::SharedPtr 
         if (norm_angle < -1) norm_angle = -1;
         cmd_vel.angular.z = norm_angle;
         vel_pub->publish(cmd_vel);
-        flag = 1;
         // RCLCPP_INFO(this->get_logger(), "正在前进");
     }
     else
