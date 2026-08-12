@@ -128,14 +128,14 @@ COMMANDS = {
         "confirm": "键盘遥控需要交互式终端输入，网页后台启动可能无法接收按键。确认启动？",
     },
     "tts": {
-        "name": "启动语音",
+        "name": "启动语音播报",
         "group": "tools",
-        "cmd": f"source {q(TROS_SETUP_FILE)} && ros2 run hobot_tts hobot_tts --ros-args -p playback_device:='hw:1,0'",
+        "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 launch voice_driver voice_tts.launch.py mode:=tts_only",
     },
     "volume_100": {
-        "name": "音量 100%",
+        "name": "测试语音模块",
         "group": "tools",
-        "cmd": "amixer -c 1 sset 'DAC' 100% && amixer -c 1 sset 'HPL' 100% && amixer -c 1 sset 'HPR' 100%",
+        "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 run voice_driver voice_speak_text -- '语音模块测试'",
         "oneshot": True,
     },
     "stop_pub_image": {
