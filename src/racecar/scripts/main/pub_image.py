@@ -4,11 +4,15 @@ from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 import cv2
+import glob
 import time  # 用于摄像头打开重试时的等待
 
 class CameraTriggerPublisher(Node):
     def __init__(self):
         super().__init__('camera_trigger_publisher')
+
+        self.declare_parameter('camera_index', -1)
+        self.camera_index = self.get_parameter('camera_index').value
         
         # 创建图像发布者
         self.publisher_ = self.create_publisher(CompressedImage, 'image', 10)
@@ -38,25 +42,54 @@ class CameraTriggerPublisher(Node):
         # 这一步非常关键：即使不显示画面，也必须不断读取，否则摄像头缓冲区会积压旧画面
         self.timer = self.create_timer(1.0 / 30.0, self.timer_callback)
 
+    def find_camera_index(self):
+        candidates = sorted(glob.glob('/dev/video*'))
+        if not candidates:
+            self.get_logger().error("未找到任何 /dev/video* 摄像头设备")
+            return None
+        for dev in candidates:
+            try:
+                idx = int(dev.split('video')[-1])
+            except ValueError:
+                continue
+            self.get_logger().info(f"尝试探测摄像头 {dev} (index={idx})...")
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+                cap.release()
+                if ret and frame is not None:
+                    self.get_logger().info(f"自动选择摄像头 {dev} (index={idx})")
+                    return idx
+            self.get_logger().warn(f"{dev} 无法抓取帧，跳过")
+        return None
+
     def open_camera(self):
         """打开摄像头：优先 V4L2 后端，重试多次；失败则回退默认后端（GStreamer）"""
         # 1) 等待摄像头设备被释放（可能刚被 saoma.py 释放）
         time.sleep(1.0)
 
-        # 2) 优先 V4L2 后端，最多重试 3 次
+        # 2) 自动探测摄像头索引（camera_index=-1 时）
+        if self.camera_index < 0:
+            detected = self.find_camera_index()
+            if detected is None:
+                self.get_logger().error("未探测到可用摄像头")
+                return cv2.VideoCapture()
+            self.camera_index = detected
+
+        # 3) 优先 V4L2 后端，最多重试 3 次
         for attempt in range(1, 4):
-            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_V4L2)
             if cap is not None and cap.isOpened():
-                self.get_logger().info(f"已通过 V4L2 后端打开摄像头（第 {attempt} 次尝试）")
+                self.get_logger().info(f"已通过 V4L2 后端打开摄像头 index={self.camera_index}（第 {attempt} 次尝试）")
                 return cap
             if cap is not None:
                 cap.release()
             self.get_logger().warn(f"V4L2 后端打开失败（第 {attempt}/3 次），等待 1 秒后重试...")
             time.sleep(1.0)
 
-        # 3) V4L2 全部失败，回退默认后端（GStreamer）
+        # 4) V4L2 全部失败，回退默认后端（GStreamer）
         self.get_logger().warn("V4L2 后端多次尝试失败，改用默认后端（GStreamer）...")
-        return cv2.VideoCapture(0)
+        return cv2.VideoCapture(self.camera_index)
 
     def timer_callback(self):
         if not self.cap.isOpened():

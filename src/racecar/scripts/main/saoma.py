@@ -1,4 +1,5 @@
 import cv2
+import glob
 import os
 import rclpy
 import re
@@ -10,6 +11,9 @@ from std_msgs.msg import String
 class QRDecoderNode(Node):
     def __init__(self):
         super().__init__('qr_decoder_node')
+
+        self.declare_parameter('camera_index', -1)
+        self.camera_index = self.get_parameter('camera_index').value
         
         self.publisher_ = self.create_publisher(String, '/qr_result', 10)
         self.tts_publisher_ = self.create_publisher(String, '/tts_text', 10)
@@ -66,25 +70,54 @@ class QRDecoderNode(Node):
         self.get_logger().info(f"开始检测... ({w}x{h})")
         self.run_detection()
 
+    def find_camera_index(self):
+        candidates = sorted(glob.glob('/dev/video*'))
+        if not candidates:
+            self.get_logger().error("未找到任何 /dev/video* 摄像头设备")
+            return None
+        for dev in candidates:
+            try:
+                idx = int(dev.split('video')[-1])
+            except ValueError:
+                continue
+            self.get_logger().info(f"尝试探测摄像头 {dev} (index={idx})...")
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+                cap.release()
+                if ret and frame is not None:
+                    self.get_logger().info(f"自动选择摄像头 {dev} (index={idx})")
+                    return idx
+            self.get_logger().warn(f"{dev} 无法抓取帧，跳过")
+        return None
+
     def open_camera(self):
         """打开摄像头：优先 V4L2 后端，重试多次；失败则回退默认后端（GStreamer）"""
         # 1) 等待旧进程释放摄像头设备（pub_image.py 刚被杀死）
         time.sleep(1.0)
 
-        # 2) 优先 V4L2 后端，最多重试 3 次
+        # 2) 自动探测摄像头索引（camera_index=-1 时）
+        if self.camera_index < 0:
+            detected = self.find_camera_index()
+            if detected is None:
+                self.get_logger().error("未探测到可用摄像头")
+                return cv2.VideoCapture()
+            self.camera_index = detected
+
+        # 3) 优先 V4L2 后端，最多重试 3 次
         for attempt in range(1, 4):
-            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_V4L2)
             if cap is not None and cap.isOpened():
-                self.get_logger().info(f"已通过 V4L2 后端打开摄像头（第 {attempt} 次尝试）")
+                self.get_logger().info(f"已通过 V4L2 后端打开摄像头 index={self.camera_index}（第 {attempt} 次尝试）")
                 return cap
             if cap is not None:
                 cap.release()
             self.get_logger().warn(f"V4L2 后端打开失败（第 {attempt}/3 次），等待 1 秒后重试...")
             time.sleep(1.0)
 
-        # 3) V4L2 全部失败，回退默认后端（GStreamer）
+        # 4) V4L2 全部失败，回退默认后端（GStreamer）
         self.get_logger().warn("V4L2 后端多次尝试失败，改用默认后端（GStreamer）...")
-        return cv2.VideoCapture(0)
+        return cv2.VideoCapture(self.camera_index)
 
     def kill_pub_image(self):
         """在启动摄像头前杀死 pub_image.py 进程"""
@@ -143,12 +176,12 @@ class QRDecoderNode(Node):
         script_path = "/root/ros2_ws/src/racecar/scripts/main/pub_image.py"
         try:
             subprocess.Popen(
-                ["python3", script_path],
+                ["python3", script_path, "--ros-args", "-p", f"camera_index:={self.camera_index}"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True
             )
-            self.get_logger().info(f"已启动: {script_path}")
+            self.get_logger().info(f"已启动: {script_path} (camera_index={self.camera_index})")
         except Exception as e:
             self.get_logger().error(f"启动脚本失败: {str(e)}")
 

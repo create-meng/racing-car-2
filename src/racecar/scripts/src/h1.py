@@ -9,7 +9,7 @@ from visualization_msgs.msg import Marker
 import csv
 import os
 import re
-import time  # 新增：用于执行停顿
+
 
 class NavThroughPosesClient(Node):
     def __init__(self):
@@ -23,10 +23,10 @@ class NavThroughPosesClient(Node):
         # 新增：用于发布到达特定点时的文本
         self.text_pub = self.create_publisher(String, "/special_goal_topic", 10)
 
-        # 新增：状态机，用于区分当前导航阶段
-        # 0: 第一阶段(dating.csv), 1: 扫码后前半段, 2: 扫码后剩余段
-        self.current_phase = 0
-        self.part2_poses = []  # 暂存第二阶段剩余的未走路点
+        # 新增：拍照触发标志与路点统计
+        self.photo_triggered = False
+        self.total_poses = 0
+        self.trigger_point = 0
 
         # 二维码接收
         self.qr_result = None
@@ -138,24 +138,21 @@ class NavThroughPosesClient(Node):
         self._get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
-        # 依靠 current_phase 状态机决定进入哪段逻辑
-        if self.current_phase == 0:
+        if self.total_poses == 0:
             self.execute_next_phase()
-        elif self.current_phase == 1:
-            self.execute_part2()
-        elif self.current_phase == 2:
-            self.get_logger().info("所有阶段导航完成！")
+        else:
+            self.get_logger().info("所有路点导航完成！")
+            self.total_poses = 0
             rclpy.shutdown()
 
     def execute_next_phase(self):
-        # 无论是第一阶段正常走完，还是被二维码中断取消，都会触发到这里
         if self.qr_result is None:
             self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别...")
             for i in range(100):
                 if self.qr_result is not None:
                     break
                 rclpy.spin_once(self, timeout_sec=0.1)
-        
+
         if self.qr_result is None:
             self.get_logger().error("未收到二维码，导航结束")
             rclpy.shutdown()
@@ -164,13 +161,13 @@ class NavThroughPosesClient(Node):
         self.get_logger().info(f"使用二维码结果：{self.qr_result}")
 
         if self.qr_result % 2 == 1:
-            self.get_logger().info("奇数：执行 shunshuizhen1.csv，将在到达第 12 个点后停顿发布")
+            self.get_logger().info("奇数：执行 shunshizhen1.csv，到达第 20 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/shunshizhen1.csv")
-            split_idx = 9  # 顺时针第 6 个点作为切分点
+            self.trigger_point = 15
         else:
-            self.get_logger().info("偶数：执行 nishuizhen1.csv，将在到达第 12 个点后停顿发布")
+            self.get_logger().info("偶数：执行 test_1.csv，到达第 34 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
-            split_idx = 10  # 逆时针第 5 个点作为切分点
+            self.trigger_point = 34
 
         next_poses = []
         for x, y, z, w in next_wp:
@@ -184,39 +181,22 @@ class NavThroughPosesClient(Node):
             pose.pose.orientation.w = w
             next_poses.append(pose)
 
-        # 切割路点
-        part1_poses = next_poses[:split_idx]
-        self.part2_poses = next_poses[split_idx:]
-        
-        # 阶段标记为1，发送前半段
-        self.current_phase = 1
-        self.send_goal(part1_poses)
-
-    def execute_part2(self):
-        # 前半段任务到达后执行此逻辑
-        self.get_logger().info("已到达指定的中断点，停顿 0.1s 并发布文本...")
-        
-        # 发布文本 gaol
-        msg = String()
-        msg.data = "gaol"
-        self.text_pub.publish(msg)
-
-        # 停顿 0.1s
-        time.sleep(0.0)
-
-        self.get_logger().info("停顿结束，发送剩余的路点任务...")
-        
-        # 阶段标记为2，发送后半段（如果有的话）
-        self.current_phase = 2
-        if self.part2_poses:
-            self.send_goal(self.part2_poses)
-        else:
-            self.get_logger().info("没有剩余路点需要执行，所有阶段导航完成！")
-            rclpy.shutdown()
+        self.total_poses = len(next_poses)
+        self.photo_triggered = False
+        self.send_goal(next_poses)
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
         self.get_logger().info('剩余距离：{0:.2f} m'.format(feedback.distance_remaining), once=True)
+
+        if not self.photo_triggered and self.total_poses > 0:
+            visited = self.total_poses - feedback.number_of_poses_remaining
+            if visited >= self.trigger_point:
+                msg = String()
+                msg.data = "gaol"
+                self.text_pub.publish(msg)
+                self.photo_triggered = True
+                self.get_logger().info(f"已到达第 {self.trigger_point} 个点，触发拍照")
 
 def main(args=None):
     rclpy.init(args=args)
