@@ -183,6 +183,7 @@ local_costmap:
       publish_frequency: 10.0
       global_frame: odom_combined
       robot_base_frame: base_footprint
+      transform_tolerance: 0.5
       use_sim_time: false
       rolling_window: true
       width: 10
@@ -224,10 +225,11 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 3.0                             
+      update_frequency: 3.0
       publish_frequency: 2.0
       global_frame: map
       robot_base_frame: base_footprint
+      transform_tolerance: 0.5
       use_sim_time: false
       rolling_window: false
       resolution: 0.06

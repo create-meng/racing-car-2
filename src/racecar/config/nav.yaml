@@ -183,6 +183,7 @@ local_costmap:
       publish_frequency: 10.0
       global_frame: odom_combined
       robot_base_frame: base_footprint
+      transform_tolerance: 0.5
       use_sim_time: false
       rolling_window: true
       width: 10
@@ -194,7 +195,7 @@ local_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.25                          
+        inflation_radius: 0.15                          
         cost_scaling_factor: 12.0                        
 
       obstacle_layer:
@@ -228,6 +229,7 @@ global_costmap:
       publish_frequency: 2.0
       global_frame: map
       robot_base_frame: base_footprint
+      transform_tolerance: 0.5
       use_sim_time: false
       rolling_window: false
       resolution: 0.06
@@ -237,7 +239,7 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.25                          
+        inflation_radius: 0.15                          
         cost_scaling_factor: 12.0                        
 
       static_layer:
