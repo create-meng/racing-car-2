@@ -202,6 +202,27 @@ class NavThroughPosesClient(Node):
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
+    def find_next_start_index(self):
+        """按当前 AMCL 位置重算循环进度，返回下一个要去的路点索引。
+
+        背景：Nav2 的 RemovePassedGoals 只删除"当前位置 0.4m 内"的路点，
+        机器人绕行/切弯时可能漏删已越过的路点（如 wp4/wp5），导致其残留
+        在目标列表里、把规划拖进 lethal 区而卡死。
+        这里取"沿路径方向最靠前、且距离当前位置 < 1.2m 的路点"作为最近到达点，
+        其下一个索引即继续点，从而跳过所有已越过/已接近的残留路点。
+        """
+        if self.amcl_pose is None or not self.loop_poses:
+            return 1
+        x, y, _ = self.amcl_pose
+        last_near = 0
+        for i, pose in enumerate(self.loop_poses):
+            p = pose.pose.position
+            d = math.hypot(p.x - x, p.y - y)
+            if d < 1.2 and i > last_near:
+                last_near = i
+        # 限制：最多比当前进度多跳 3 个路点，防止闭环路径上误判跳过头（如跳到 wp16）
+        return max(1, min(last_near + 1, max(1, self._last_visited) + 3))
+
     def get_result_callback(self, future):
         self._goal_active = False  # 看门狗：当前目标已结束
         # 第一阶段(dating.csv)结束或被扫码中断 → 进入第二阶段
@@ -239,15 +260,16 @@ class NavThroughPosesClient(Node):
                 self.get_logger().info("所有路点导航完成！")
                 rclpy.shutdown()
             else:
-                # 卡墙/取消 → 跳过当前不可达路点，继续下一个
-                start = max(1, self._last_visited) + 1
+                # 卡墙/取消 → 按当前位置重算进度，跳过已越过的残留路点（如 wp4/wp5），
+                # 从当前位置之后的路点继续走，避免被残留路点拖进 lethal 区卡死
+                start = self.find_next_start_index()
                 if start >= self.loop_total:
                     self.get_logger().info("所有路点已完成！")
                     rclpy.shutdown()
                     return
                 self._last_visited = start
                 self.get_logger().warn(
-                    f"卡墙，跳过第 {start-1} 个路点，从第 {start} 个继续走（共 {self.loop_total} 点）")
+                    f"卡墙，按当前位置重算进度，从第 {start} 个路点继续走（共 {self.loop_total} 点）")
                 self.total_poses = self.loop_total
                 self.photo_triggered = False
                 # 短暂等待后重新规划

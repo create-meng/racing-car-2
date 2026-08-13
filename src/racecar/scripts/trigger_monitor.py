@@ -55,13 +55,21 @@ class TriggerMonitor(Node):
         self.log_fh = open(self.log_path, "w", encoding="utf-8")
 
         # ---- QoS ----
-        # 注意：Nav2 的 /costmap_raw、/costmap 发布 QoS 是 transient_local + reliable，
-        # 订阅方必须用 TRANSIENT_LOCAL 才能收到（VOLATILE 会收不到，导致 g_cost/near_obs 为空）
-        # TRANSIENT_LOCAL 订阅兼容 volatile 发布者，因此 amcl_pose/cmd_vel/goal_pose 也能正常收到
+        # Nav2 的 /costmap_raw、/costmap 发布 QoS 是 transient_local + reliable，
+        # 订阅方必须用 TRANSIENT_LOCAL 才能收到（否则 g_cost/near_obs 为空）。
+        # 但 /amcl_pose、/goal_pose、/cmd_vel 的发布方是 volatile —— 若订阅方也用
+        # TRANSIENT_LOCAL，会因 DURABILITY 不兼容而收不到（订阅方请求更强持久性时
+        # volatile 发布者无法满足）。因此拆成两个 QoS：
         costmap_qos = QoSProfile(
             depth=2,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        generic_qos = QoSProfile(
+            depth=2,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
         )
 
@@ -83,7 +91,7 @@ class TriggerMonitor(Node):
                 PoseWithCovarianceStamped,
                 "/amcl_pose",
                 self.cb_amcl,
-                costmap_qos,
+                generic_qos,
             )
             self.create_subscription(
                 LaserScan,
@@ -95,13 +103,13 @@ class TriggerMonitor(Node):
                 PoseStamped,
                 "/goal_pose",
                 self.cb_goal,
-                costmap_qos,
+                generic_qos,
             )
             self.create_subscription(
                 Twist,
                 "/cmd_vel",
                 self.cb_cmd,
-                costmap_qos,
+                generic_qos,
             )
         except Exception as e:
             self.log(f"[ERROR] 订阅创建失败: {e}")
