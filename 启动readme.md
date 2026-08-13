@@ -8,15 +8,16 @@ ros2 launch lslidar_driver lsn10_launch.py #启动雷达
 
 cd /root/ros2_ws/
 source install/setup.bash
+ros2 launch deptrum-ros-driver-aurora930 aurora930_launch.py  #启动深度相机
+
+cd /root/ros2_ws/
+source install/setup.bash
 ros2 launch racecar Run_nav.launch.py  #启动nav2导航节点
 
 rviz2 #打开rviz2
 
 cd /root/ros2_ws/src/racecar/scripts/main/
-python3 saoma.py   #启动二维码文件
-
-cd /root/ros2_ws/src/racecar/scripts/main/
-python3 ai_qw.py   #启动图生文
+python3 saoma.py   #启动合并版节点（双摄像头扫码 + 图生文 + image发布）
 
 cd /root/ros2_ws/
 source install/setup.bash
