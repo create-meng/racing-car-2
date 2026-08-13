@@ -2,7 +2,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch_ros.actions import Node
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
@@ -24,6 +24,9 @@ def generate_launch_description():
     param_file = LaunchConfiguration('params', default=os.path.join(
         param_dir, 'nav.yaml'))
 
+    # 诊断监控脚本路径（触发"乱飘"时自动写日志）
+    trigger_monitor_script = '/root/ros2_ws/src/racecar/scripts/trigger_monitor.py'
+
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -41,6 +44,13 @@ def generate_launch_description():
             name='waypoint_cycle',
             package='nav2_waypoint_cycle',
             executable='nav2_waypoint_cycle',
+        ),
+
+        # 自动启动诊断监控（写日志，不影响导航）
+        ExecuteProcess(
+            cmd=['python3', trigger_monitor_script],
+            name='trigger_monitor',
+            output='screen',
         ),
 
         IncludeLaunchDescription(

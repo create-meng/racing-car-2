@@ -4,9 +4,10 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from nav2_msgs.action import NavigateThroughPoses
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped
 import csv
 from std_srvs.srv import Trigger  # 导入 Trigger 服务
+import math
 
 class NavThroughPosesClient(Node):
     def __init__(self):
@@ -18,6 +19,30 @@ class NavThroughPosesClient(Node):
         self.is_paused = False  # 标志位，用于控制是否暂停导航
         self.cycle_number=0
         self.fin_flag=False
+
+        # 订阅 AMCL 定位，记录实际位姿
+        self.amcl_pose = None
+        self.amcl_sub = self.create_subscription(
+            PoseWithCovarianceStamped, "/amcl_pose", self.amcl_callback, 10
+        )
+
+    def amcl_callback(self, msg):
+        p = msg.pose.pose
+        q = p.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self.amcl_pose = (p.position.x, p.position.y, yaw)
+
+    def log_amcl(self, tag):
+        if self.amcl_pose is None:
+            self.get_logger().info(f"[{tag}] amcl_pose: (无位姿)")
+            return
+        x, y, yaw = self.amcl_pose
+        self.get_logger().info(
+            f"[{tag}] amcl_pose: x={x:.3f} y={y:.3f} yaw={math.degrees(yaw):.1f}°"
+        )
 
     def send_goal(self, poses):
         goal_msg = NavigateThroughPoses.Goal()
@@ -48,11 +73,16 @@ class NavThroughPosesClient(Node):
         if  feedback.distance_remaining > 0.0:
             self.get_logger().info(f'Distance to target: {feedback.distance_remaining:.2f} meters')
             self.distance_remaining = feedback.distance_remaining
+            # 每经过一段距离记录一次 AMCL 位姿（约 2m 一次）
+            if not hasattr(self, '_last_dist') or self._last_dist - feedback.distance_remaining > 2.0:
+                self.log_amcl("途中")
+                self._last_dist = feedback.distance_remaining
             # 如果距离目标点的距离小于 1 米，发送停止命令
             if self.distance_remaining is not None and feedback.distance_remaining < 0.5 and not self.is_paused:
 
 
                 self.get_logger().info('Reached the target, stopping the robot.')
+                self.log_amcl("到达")
                 self.is_paused = True  # 设置标志位为暂停状态
                 twist = Twist()
                 twist.linear.x = 0.0

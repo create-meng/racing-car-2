@@ -29,4 +29,5 @@ python3 h1.py  #启动导航文件
 
 cd /root/ros2_ws/
 colcon build
+colcon build --packages-select <package_name>
 source install/setup.bash   # 如果修改了nav.yaml完参数需要重新编译

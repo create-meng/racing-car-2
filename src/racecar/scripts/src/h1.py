@@ -4,11 +4,12 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String  # 必须是String！
 from nav2_msgs.action import NavigateThroughPoses
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
 import csv
 import os
 import re
+import math
 
 
 class NavThroughPosesClient(Node):
@@ -17,16 +18,26 @@ class NavThroughPosesClient(Node):
         self._action_client = ActionClient(self, NavigateThroughPoses, 'navigate_through_poses')
         self._goal_handle = None # 用于记录当前任务句柄
 
+        # 订阅 AMCL 定位，用于记录实际位姿到日志
+        self.amcl_pose = None
+        self.amcl_sub = self.create_subscription(
+            PoseWithCovarianceStamped,
+            "/amcl_pose",
+            self.amcl_callback,
+            10,
+        )
+
         self.marker_pub = self.create_publisher(Marker, "/forbidden_zone_marker", 10)
         self.timer = self.create_timer(1.0, self.show_forbidden_zone)
 
-        # 新增：用于发布到达特定点时的文本
+        # 用于发布到达特定点时的文本
         self.text_pub = self.create_publisher(String, "/special_goal_topic", 10)
 
-        # 新增：拍照触发标志与路点统计
+        # 拍照触发标志与路点统计
         self.photo_triggered = False
         self.total_poses = 0
         self.trigger_point = 0
+        self.first_phase_done = False  # 标记第一阶段(dating.csv)是否完成
 
         # 二维码接收
         self.qr_result = None
@@ -40,7 +51,27 @@ class NavThroughPosesClient(Node):
         self.get_logger().info("导航路点客户端已启动，等待 Nav2 连接...")
         self.get_logger().info("二维码监听已启动：识别到数字后将立即切换路径")
 
-    # 强制接收，一旦收到有效数字，立即停止当前任务并执行下一阶段
+    def amcl_callback(self, msg):
+        """记录 AMCL 定位位姿 (map 系)。"""
+        p = msg.pose.pose
+        q = p.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self.amcl_pose = (p.position.x, p.position.y, yaw)
+
+    def log_amcl(self, tag):
+        """把当前 AMCL 位姿写入日志。"""
+        if self.amcl_pose is None:
+            self.get_logger().info(f"[{tag}] amcl_pose: (无位姿)")
+            return
+        x, y, yaw = self.amcl_pose
+        self.get_logger().info(
+            f"[{tag}] amcl_pose: x={x:.3f} y={y:.3f} yaw={math.degrees(yaw):.1f}°"
+        )
+
+    # 二维码接收
     def qr_callback(self, msg):
         if self.qr_result is not None:  # 如果已经处理过结果，则跳过
             return
@@ -134,15 +165,16 @@ class NavThroughPosesClient(Node):
 
         self._goal_handle = goal_handle # 保存当前句柄
         self.get_logger().info("路点任务已接受！")
+        self.log_amcl("任务开始")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
-        if self.total_poses == 0:
+        if not self.first_phase_done:
+            self.first_phase_done = True
             self.execute_next_phase()
         else:
             self.get_logger().info("所有路点导航完成！")
-            self.total_poses = 0
             rclpy.shutdown()
 
     def execute_next_phase(self):
@@ -187,10 +219,24 @@ class NavThroughPosesClient(Node):
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
-        self.get_logger().info('剩余距离：{0:.2f} m'.format(feedback.distance_remaining), once=True)
+        remaining = feedback.distance_remaining
+        if self.total_poses > 0:
+            visited = self.total_poses - feedback.number_of_poses_remaining
+            self.get_logger().info(
+                "剩余距离：{0:.2f} m | 已过 {1}/{2} 个点".format(remaining, visited, self.total_poses),
+                once=True,
+            )
+            # 每到达一个新路点时记录 AMCL 位姿
+            if hasattr(self, '_last_visited') and visited != self._last_visited:
+                self.log_amcl(f"到达路点 {visited}")
+            self._last_visited = visited
+        else:
+            self.get_logger().info(
+                "剩余距离：{0:.2f} m | 剩余路点 {1} 个".format(remaining, feedback.number_of_poses_remaining),
+                once=True,
+            )
 
         if not self.photo_triggered and self.total_poses > 0:
-            visited = self.total_poses - feedback.number_of_poses_remaining
             if visited >= self.trigger_point:
                 msg = String()
                 msg.data = "gaol"
