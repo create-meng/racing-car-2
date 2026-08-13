@@ -35,7 +35,7 @@ from rclpy.qos import (
     HistoryPolicy,
     qos_profile_sensor_data,
 )
-from nav2_msgs.msg import Costmap as Nav2Costmap
+from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import LaserScan
 
@@ -55,18 +55,7 @@ class TriggerMonitor(Node):
         self.log_fh = open(self.log_path, "w", encoding="utf-8")
 
         # ---- QoS ----
-        # Nav2 的 /costmap_raw、/costmap 发布 QoS 是 transient_local + reliable，
-        # 订阅方必须用 TRANSIENT_LOCAL 才能收到（否则 g_cost/near_obs 为空）。
-        # 但 /amcl_pose、/goal_pose、/cmd_vel 的发布方是 volatile —— 若订阅方也用
-        # TRANSIENT_LOCAL，会因 DURABILITY 不兼容而收不到（订阅方请求更强持久性时
-        # volatile 发布者无法满足）。因此拆成两个 QoS：
         costmap_qos = QoSProfile(
-            depth=2,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-        )
-        generic_qos = QoSProfile(
             depth=2,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -76,13 +65,13 @@ class TriggerMonitor(Node):
         # ---- 订阅 ----
         try:
             self.create_subscription(
-                Nav2Costmap,
+                OccupancyGrid,
                 "/global_costmap/costmap_raw",
                 self.cb_global_costmap,
                 costmap_qos,
             )
             self.create_subscription(
-                Nav2Costmap,
+                OccupancyGrid,
                 "/local_costmap/costmap_raw",
                 self.cb_local_costmap,
                 costmap_qos,
@@ -91,7 +80,7 @@ class TriggerMonitor(Node):
                 PoseWithCovarianceStamped,
                 "/amcl_pose",
                 self.cb_amcl,
-                generic_qos,
+                costmap_qos,
             )
             self.create_subscription(
                 LaserScan,
@@ -103,21 +92,21 @@ class TriggerMonitor(Node):
                 PoseStamped,
                 "/goal_pose",
                 self.cb_goal,
-                generic_qos,
+                costmap_qos,
             )
             self.create_subscription(
                 Twist,
                 "/cmd_vel",
                 self.cb_cmd,
-                generic_qos,
+                costmap_qos,
             )
         except Exception as e:
             self.log(f"[ERROR] 订阅创建失败: {e}")
             raise
 
         # ---- 状态 ----
-        self.global_costmap = None  # nav2_msgs/Costmap (raw 0-255)
-        self.local_costmap = None   # nav2_msgs/Costmap (raw 0-255)
+        self.global_costmap = None  # nav_msgs/OccupancyGrid (raw 0-255)
+        self.local_costmap = None   # nav_msgs/OccupancyGrid (raw 0-255)
         self.amcl_pose = None       # (x, y, yaw)
         self.amcl_cov = None        # covariance array (36)
         self.prev_amcl = None       # (x, y, yaw)
@@ -194,10 +183,11 @@ class TriggerMonitor(Node):
         """在 map 系取 (x, y) 处的 raw cost (0-255)。"""
         if cm is None:
             return None
-        cx = int((x - cm.origin_x) / cm.resolution)
-        cy = int((y - cm.origin_y) / cm.resolution)
-        if 0 <= cx < cm.meta_width and 0 <= cy < cm.meta_height:
-            return cm.data[cy * cm.meta_width + cx]
+        o = cm.info.origin.position
+        cx = int((x - o.x) / cm.info.resolution)
+        cy = int((y - o.y) / cm.info.resolution)
+        if 0 <= cx < cm.info.width and 0 <= cy < cm.info.height:
+            return cm.data[cy * cm.info.width + cx]
         return None
 
     def footprint_costs(self, cm):
@@ -222,8 +212,8 @@ class TriggerMonitor(Node):
         cm = self.local_costmap
         if cm is None:
             return None
-        res = cm.resolution
-        w, h = cm.meta_width, cm.meta_height
+        res = cm.info.resolution
+        w, h = cm.info.width, cm.info.height
         cx, cy = w // 2, h // 2
         best = None
         r_cells = int(5.0 / res)  # 只扫 5m 半径
@@ -235,7 +225,7 @@ class TriggerMonitor(Node):
             row_start = dy * w
             for dx in range(x0, x1):
                 c = cm.data[row_start + dx]
-                if c == 253 or c == 254:  # lethal / inscribed (不含 unknown 255)
+                if c >= 250:  # lethal / inscribed
                     d = math.hypot(dx - cx, dy - cy) * res
                     if best is None or d < best:
                         best = d
@@ -245,8 +235,7 @@ class TriggerMonitor(Node):
         """全局 costmap 中占据单元数 (cost >= 250)。"""
         if cm is None:
             return None
-        # nav2_msgs/Costmap: 253=inscribed, 254=lethal, 255=unknown
-        return sum(1 for v in cm.data if v == 253 or v == 254)
+        return sum(1 for v in cm.data if v >= 250)
 
     def cov_magnitude(self):
         """AMCL 协方差矩阵的 x, y, yaw 对角元平方和。"""
@@ -354,7 +343,7 @@ class TriggerMonitor(Node):
                 f"cost_max={mx} fp_costs={costs} "
                 f"pose=({x:.2f},{y:.2f},{math.degrees(yaw):.1f}°)",
             )
-        elif mx == 253:
+        elif mx >= 253:
             x, y, _ = self.amcl_pose
             self.trigger(
                 "INSCRIBED",

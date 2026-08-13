@@ -4,7 +4,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String  # 必须是String！
 from nav2_msgs.action import NavigateThroughPoses
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
 import csv
 import os
@@ -37,21 +37,7 @@ class NavThroughPosesClient(Node):
         self.photo_triggered = False
         self.total_poses = 0
         self.trigger_point = 0
-        self.first_phase_done = False  # 标记第一阶段(dating.csv)是否完成
-
-        # 第二阶段(循环)状态：步骤A 先到第一个路点回正航向，步骤B 再正着跑完整圈
-        self.loop_poses = None      # 循环全量路点 (PoseStamped 列表)
-        self.loop_total = 0         # 循环总路点数（步骤B 用于拍照计数）
-        self.phase2_step = 0        # 0=步骤A(回正航向,单首点) 1=步骤B(整圈)
-        self.phase2_retries = 0     # 步骤B 失败自动重试计数（临时 lethal 误判时继续走）
-        self._last_visited = 0      # 最近一次到达的路点计数（用于失败后从中断处继续）
-
-        # --- 卡点看门狗：5s 无进展就主动取消目标，跳过当前路点继续走，不等 Nav2 磨蹭 ---
-        self._goal_active = False            # 当前是否有执行中的目标
-        self._last_progress = self.get_clock().now()   # 最近一次"有进展"的时刻
-        self._last_remaining = float('inf')  # 上一次反馈的剩余距离
-        self.watchdog_timer = self.create_timer(1.0, self.watchdog_tick)
-
+        self.first_phase_done = False
         # 二维码接收
         self.qr_result = None
         self.qr_sub = self.create_subscription(
@@ -97,13 +83,11 @@ class NavThroughPosesClient(Node):
         if nums:
             num = int(nums[0])
             self.qr_result = num
-            self.get_logger().info(f"【触发切换】识别到数字 {self.qr_result}，立即中断当前任务！")
-            
-            # 如果当前正在导航，则取消当前任务，这会触发 get_result_callback
-            if self._goal_handle is not None:
+            self.get_logger().info(f"【收到二维码】识别到数字 {self.qr_result}")
+            if self._goal_handle is not None and not self.first_phase_done:
+                self.get_logger().info("正在执行 dating.csv，取消当前任务并切换二维码路线")
                 self._goal_handle.cancel_goal_async()
-            else:
-                # 如果任务还没开始或已结束，直接手动调用逻辑
+            elif self.first_phase_done:
                 self.execute_next_phase()
 
     def show_forbidden_zone(self):
@@ -142,21 +126,6 @@ class NavThroughPosesClient(Node):
                     waypoints.append((x, y, z, w))
         return waypoints
 
-    def build_poses(self, wp_list):
-        """把 (x,y,z,w) 四元组列表构造成 PoseStamped 列表。"""
-        poses = []
-        for x, y, z, w in wp_list:
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.z = z
-            pose.pose.orientation.w = w
-            poses.append(pose)
-        return poses
-
     def send_goal(self, poses):
         safe_poses = []
         for i, pose in enumerate(poses):
@@ -188,140 +157,62 @@ class NavThroughPosesClient(Node):
     def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("路点任务被拒绝！按失败推进状态机，避免卡死")
-            self.get_result_callback(None)
+            self.get_logger().error("路点任务被拒绝！")
             return
 
         self._goal_handle = goal_handle # 保存当前句柄
         self.get_logger().info("路点任务已接受！")
         self.log_amcl("任务开始")
-        # 重置看门狗计时
-        self._goal_active = True
-        self._last_progress = self.get_clock().now()
-        self._last_remaining = float('inf')
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
-    def find_next_start_index(self):
-        """按当前 AMCL 位置重算循环进度，返回下一个要去的路点索引。
-
-        背景：Nav2 的 RemovePassedGoals 只删除"当前位置 0.4m 内"的路点，
-        机器人绕行/切弯时可能漏删已越过的路点（如 wp4/wp5），导致其残留
-        在目标列表里、把规划拖进 lethal 区而卡死。
-        这里取"沿路径方向最靠前、且距离当前位置 < 1.2m 的路点"作为最近到达点，
-        其下一个索引即继续点，从而跳过所有已越过/已接近的残留路点。
-        """
-        if self.amcl_pose is None or not self.loop_poses:
-            return 1
-        x, y, _ = self.amcl_pose
-        last_near = 0
-        for i, pose in enumerate(self.loop_poses):
-            p = pose.pose.position
-            d = math.hypot(p.x - x, p.y - y)
-            if d < 1.2 and i > last_near:
-                last_near = i
-        # 限制：最多比当前进度多跳 3 个路点，防止闭环路径上误判跳过头（如跳到 wp16）
-        return max(1, min(last_near + 1, max(1, self._last_visited) + 3))
-
     def get_result_callback(self, future):
-        self._goal_active = False  # 看门狗：当前目标已结束
-        # 第一阶段(dating.csv)结束或被扫码中断 → 进入第二阶段
+        self._goal_handle = None
         if not self.first_phase_done:
             self.first_phase_done = True
-            self.execute_next_phase()
+            if self.qr_result is None:
+                self.get_logger().info("dating.csv 已完成，等待二维码识别...")
+            else:
+                self.execute_next_phase()
             return
-
-        # ---- 第二阶段状态机 ----
-        status = None
-        if future is not None and future.result() is not None:
-            status = future.result().status  # goal_status: 4=SUCCEEDED
-
-        if self.phase2_step == 0:
-            # 步骤A（先到第一个路点回正航向）结束
-            if status == 4:
-                self.get_logger().info("已到第一个路点，航向回正，开始正着跑完整圈")
-                self.phase2_step = 1
-                self.phase2_retries = 0
-                self._last_visited = 1
-                self.total_poses = self.loop_total
-                self.photo_triggered = False
-                self.send_goal(self.loop_poses[1:])
-            else:
-                # 失败/被取消/空目标 → 回退为整圈全量路点方式，保证任务不卡死
-                self.get_logger().warn(
-                    f"步骤A(回正航向)未成功(status={status})，回退为整圈全量路点方式")
-                self.phase2_step = 1
-                self.total_poses = self.loop_total
-                self.photo_triggered = False
-                self.send_goal(self.loop_poses)
-        else:
-            # 步骤B（整圈）结束
-            if status == 4:
-                self.get_logger().info("所有路点导航完成！")
-                rclpy.shutdown()
-            else:
-                # 卡墙/取消 → 按当前位置重算进度，跳过已越过的残留路点（如 wp4/wp5），
-                # 从当前位置之后的路点继续走，避免被残留路点拖进 lethal 区卡死
-                start = self.find_next_start_index()
-                if start >= self.loop_total:
-                    self.get_logger().info("所有路点已完成！")
-                    rclpy.shutdown()
-                    return
-                self._last_visited = start
-                self.get_logger().warn(
-                    f"卡墙，按当前位置重算进度，从第 {start} 个路点继续走（共 {self.loop_total} 点）")
-                self.total_poses = self.loop_total
-                self.photo_triggered = False
-                # 短暂等待后重新规划
-                for _ in range(5):
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                self.send_goal(self.loop_poses[start:])
+        self.get_logger().info("所有路点导航完成！")
+        rclpy.shutdown()
 
     def execute_next_phase(self):
         if self.qr_result is None:
-            self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别...")
-            for i in range(200):
-                if self.qr_result is not None:
-                    break
-                rclpy.spin_once(self, timeout_sec=0.1)
-
-        if self.qr_result is None:
-            self.get_logger().error("未收到二维码，导航结束")
-            rclpy.shutdown()
+            self.get_logger().info("dating.csv 已完成，等待二维码...")
             return
 
         self.get_logger().info(f"使用二维码结果：{self.qr_result}")
 
         if self.qr_result % 2 == 1:
-            self.get_logger().info("奇数：执行 shunshizhen1.csv（顺时针循环）")
+            self.get_logger().info("奇数：执行 shunshizhen1.csv，到达第 20 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/shunshizhen1.csv")
+            self.trigger_point = 15
         else:
-            self.get_logger().info("偶数：执行 test_1.csv（逆时针循环）")
+            self.get_logger().info("偶数：执行 test_1.csv，到达第 34 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
+            self.trigger_point = 34
 
-        # 拍照触发点：倒数第 2 个路点（保持原 shunshizhen1=15 语义，对两个循环都自适应）
-        self.trigger_point = len(next_wp) - 1
-        self.get_logger().info(f"循环共 {len(next_wp)} 个路点，到达第 {self.trigger_point} 个点后触发拍照")
+        next_poses = []
+        for x, y, z, w in next_wp:
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.z = z
+            pose.pose.orientation.w = w
+            next_poses.append(pose)
 
-        # 构建循环全量路点
-        self.loop_poses = self.build_poses(next_wp)
-        self.loop_total = len(self.loop_poses)
-
-        # 步骤A：先只发第一个路点，强制到点后回正航向（对准循环前进方向）
-        # 步骤A期间 total_poses=1 且抑制拍照，避免误触发
-        self.phase2_step = 0
-        self.photo_triggered = True
-        self.total_poses = 1
-        self.get_logger().info(f"步骤A：先导航到循环第一个路点以回正航向（共 {self.loop_total} 个点）")
-        self.send_goal(self.loop_poses[:1])
+        self.total_poses = len(next_poses)
+        self.photo_triggered = False
+        self.send_goal(next_poses)
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
         remaining = feedback.distance_remaining
-        # 看门狗：剩余距离下降 = 有进展，刷新计时
-        if remaining < self._last_remaining:
-            self._last_progress = self.get_clock().now()
-        self._last_remaining = remaining
         if self.total_poses > 0:
             visited = self.total_poses - feedback.number_of_poses_remaining
             self.get_logger().info(
@@ -346,21 +237,11 @@ class NavThroughPosesClient(Node):
                 self.photo_triggered = True
                 self.get_logger().info(f"已到达第 {self.trigger_point} 个点，触发拍照")
 
-    def watchdog_tick(self):
-        """1Hz 看门狗：目标在执行但 5s 无进展 → 主动取消，跳过该路点继续走。"""
-        if not self._goal_active or self._goal_handle is None:
-            return
-        if (self.get_clock().now() - self._last_progress).nanoseconds > 5e9:
-            self.get_logger().warn("看门狗：5s 无进展，主动取消当前目标以继续走")
-            self._goal_handle.cancel_goal_async()
-            self._last_progress = self.get_clock().now()
-
 def main(args=None):
     rclpy.init(args=args)
     client = NavThroughPosesClient()
 
     waypoints = client.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/dating.csv")
-
     poses = []
     for x, y, z, w in waypoints:
         pose = PoseStamped()
@@ -373,6 +254,7 @@ def main(args=None):
         pose.pose.orientation.w = w
         poses.append(pose)
 
+    client.get_logger().info("h1 已启动：先执行 dating.csv，扫码后切换对应路线")
     client.send_goal(poses)
     rclpy.spin(client)
 

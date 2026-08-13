@@ -36,6 +36,7 @@ class MergedQRNode(Node):
         self.qr_detected = False
         self.latest_depth_frame = None
         self.last_qr_content = ""
+        self.scan_lock = threading.Lock()
 
         # ===== 加载微信二维码模型 =====
         model_dir = "/userdata/dev_ws/src/origincar/wechat_qr_models/"
@@ -155,16 +156,21 @@ class MergedQRNode(Node):
     def usb_qr_loop(self):
         """线程1: USB摄像头连续扫码"""
         while rclpy.ok() and not self.qr_detected:
-            ret, frame = self.usb_cap.read()
-            if not ret:
-                time.sleep(0.1)
-                continue
+            try:
+                ret, frame = self.usb_cap.read()
+                if not ret:
+                    time.sleep(0.1)
+                    continue
 
-            res, _ = self.detector.detectAndDecode(frame)
-            for content in res:
-                if content and content != self.last_qr_content:
-                    self.on_qr_detected(content)
-                    return
+                with self.scan_lock:
+                    res, _ = self.detector.detectAndDecode(frame)
+                for content in res:
+                    if content and content != self.last_qr_content:
+                        self.on_qr_detected(content)
+                        return
+            except Exception as e:
+                self.get_logger().warn(f"USB扫码帧处理异常，继续下一帧: {e}")
+                time.sleep(0.1)
 
     def depth_image_callback(self, msg):
         """深度相机RGB帧到达 → 缓存帧 + 扫码"""
@@ -174,7 +180,8 @@ class MergedQRNode(Node):
             frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             self.latest_depth_frame = frame
 
-            res, _ = self.detector.detectAndDecode(frame)
+            with self.scan_lock:
+                res, _ = self.detector.detectAndDecode(frame)
             for content in res:
                 if content and content != self.last_qr_content:
                     self.on_qr_detected(content)
@@ -293,5 +300,4 @@ def main(args=None):
             rclpy.shutdown()
 
 if __name__ == '__main__':
-    main()
     main()

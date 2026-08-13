@@ -2,7 +2,7 @@
 
 ## 规划阶段时不要全面列举文件，列表说明修改内容和原因
 ## 修改内容大白话解释，并列表说明修改
-## 完成后自行colcon build --packages-select <包名>
+## 完成后自行colcon build --packages-select <包名>，禁止使用--symlink-install
 
 # 每次让你分析时，记得全面查看相关日志，不得凭单日志下定论
 

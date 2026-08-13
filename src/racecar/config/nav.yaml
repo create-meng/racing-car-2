@@ -145,11 +145,11 @@ controller_server:
         threshold_to_consider: 1.4
       GoalAngleCritic:
         cost_power: 1
-        cost_weight: 3.0
+        cost_weight: 1.0
         threshold_to_consider: 0.5
       PreferForwardCritic:
         cost_power: 1
-        cost_weight: 2.0                 # 【前进偏好】不压制回程小倒车，仍保持正面前进
+        cost_weight: 0.1                 # 【解除倒车封印】极低的前进偏好，允许自由倒车
       ObstaclesCritic:
         repulsion_weight: 5.0            
         critical_weight: 20.0            
@@ -159,15 +159,15 @@ controller_server:
         near_goal_distance: 0.5
       PathAlignCritic:
         cost_power: 1
-        cost_weight: 8.0                # 加强贴点，过弯少切角，路点稳定进半径
+        cost_weight: 1.0                
         max_heuristic_dist: 1.5
       PathFollowCritic:
         cost_power: 1
-        cost_weight: 8.0
+        cost_weight: 5.0
         offset_from_furthest: 20
       PathAngleCritic:
         cost_power: 1
-        cost_weight: 1.5
+        cost_weight: 0.5
         offset_from_furthest: 4
         threshold_to_consider: 1.0
         max_angle_to_furthest: 0.785
@@ -189,13 +189,13 @@ local_costmap:
       width: 10
       height: 10
       resolution: 0.05                                  
-      robot_radius: 0.085
-      footprint: "[ [-0.14, -0.085], [-0.14, 0.085], [0.14, 0.085], [0.14, -0.085] ]"
+      robot_radius: 0.15
+      footprint: "[ [-0.15, -0.10], [-0.15, 0.10], [0.25, 0.10], [0.25, -0.10] ]"
       plugins: ["obstacle_layer", "inflation_layer"]
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.12                          
+        inflation_radius: 0.16                          
         cost_scaling_factor: 12.0                        
 
       obstacle_layer:
@@ -211,7 +211,7 @@ local_costmap:
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
           obstacle_max_range: 4.5
-          obstacle_min_range: 0.30
+          obstacle_min_range: 0.01
       always_send_full_costmap: false
 
   local_costmap_client:
@@ -233,13 +233,13 @@ global_costmap:
       use_sim_time: false
       rolling_window: false
       resolution: 0.06
-      robot_radius: 0.085
-      footprint: "[ [-0.14, -0.085], [-0.14, 0.085], [0.14, 0.085], [0.14, -0.085] ]"
+      robot_radius: 0.15
+      footprint: "[ [-0.15, -0.10], [-0.15, 0.10], [0.25, 0.10], [0.25, -0.10] ]"
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"] 
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.12
+        inflation_radius: 0.16                          
         cost_scaling_factor: 12.0                        
 
       static_layer:
@@ -259,7 +259,7 @@ global_costmap:
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
           obstacle_max_range: 3.0
-          obstacle_min_range: 0.30
+          obstacle_min_range: 0.1
       always_send_full_costmap: true
 
   global_costmap_client:
@@ -291,8 +291,8 @@ planner_server:
 
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
-      tolerance: 1.5
-      allow_unknown: true
+      tolerance: 1.0
+      allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 1.0                            
@@ -306,7 +306,7 @@ planner_server:
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
       minimum_turning_radius: 0.6                       
-      reverse_penalty: 1.5                               # 【回程可倒车】短倒车(回第一个路点)允许，整圈长倒车代价大被避免
+      reverse_penalty: 1.0                               # 【降低倒车惩罚】允许全局地图生成向后的绿线
       non_straight_penalty: 30.0
       change_penalty: 20.0                              
       cost_penalty: 18.0                                 
