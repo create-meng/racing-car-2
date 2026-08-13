@@ -6,6 +6,7 @@ from std_msgs.msg import String  # 必须是String！
 from nav2_msgs.action import NavigateThroughPoses
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
+from action_msgs.msg import GoalStatus
 import csv
 import os
 import re
@@ -86,7 +87,8 @@ class NavThroughPosesClient(Node):
             self.get_logger().info(f"【收到二维码】识别到数字 {self.qr_result}")
             if self._goal_handle is not None and not self.first_phase_done:
                 self.get_logger().info("正在执行 dating.csv，取消当前任务并切换二维码路线")
-                self._goal_handle.cancel_goal_async()
+                cancel_future = self._goal_handle.cancel_goal_async()
+                cancel_future.add_done_callback(self.cancel_response_callback)
             elif self.first_phase_done:
                 self.execute_next_phase()
 
@@ -166,14 +168,47 @@ class NavThroughPosesClient(Node):
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
+    def cancel_response_callback(self, future):
+        try:
+            response = future.result()
+            count = len(response.goals_canceling)
+            self.get_logger().info(f"取消请求已返回：服务端接受 {count} 个目标")
+        except Exception as exc:
+            self.get_logger().error(f"取消请求失败：{exc}")
+
     def get_result_callback(self, future):
         self._goal_handle = None
+        status = future.result().status
+        status_names = {
+            GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
+            GoalStatus.STATUS_CANCELED: "CANCELED",
+            GoalStatus.STATUS_ABORTED: "ABORTED",
+        }
+        status_name = status_names.get(status, f"UNKNOWN({status})")
+        self.get_logger().info(f"导航任务结束，状态：{status_name}")
+
         if not self.first_phase_done:
+            if status == GoalStatus.STATUS_CANCELED and self.qr_result is None:
+                self.get_logger().error("第一阶段被取消，但未收到二维码，不能按正常完成处理")
+                return
+            if status == GoalStatus.STATUS_ABORTED:
+                self.get_logger().error("第一阶段导航异常失败，未继续切换路线")
+                return
             self.first_phase_done = True
-            if self.qr_result is None:
+            if status == GoalStatus.STATUS_CANCELED and self.qr_result is not None:
+                self.get_logger().warn("第一阶段因扫码被主动取消，开始执行二维码路线")
+                self.first_phase_done = True
+                self.execute_next_phase()
+                return
+            elif self.qr_result is None:
                 self.get_logger().info("dating.csv 已完成，等待二维码识别...")
             else:
                 self.execute_next_phase()
+            return
+
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().error(f"二维码路线未成功完成，状态：{status_name}")
+            rclpy.shutdown()
             return
         self.get_logger().info("所有路点导航完成！")
         rclpy.shutdown()
@@ -193,6 +228,19 @@ class NavThroughPosesClient(Node):
             self.get_logger().info("偶数：执行 test_1.csv，到达第 34 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
             self.trigger_point = 34
+
+        if self.amcl_pose and next_wp:
+            current_x, current_y, _ = self.amcl_pose
+            start_index = min(
+                range(len(next_wp)),
+                key=lambda i: math.hypot(next_wp[i][0] - current_x, next_wp[i][1] - current_y),
+            )
+            if start_index:
+                self.get_logger().info(
+                    f"扫码路线从最近路点 {start_index + 1}/{len(next_wp)} 接入，跳过已在车后的 {start_index} 个点"
+                )
+                next_wp = next_wp[start_index:]
+                self.trigger_point = max(1, self.trigger_point - start_index)
 
         next_poses = []
         for x, y, z, w in next_wp:

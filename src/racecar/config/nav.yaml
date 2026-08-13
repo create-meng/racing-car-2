@@ -111,16 +111,16 @@ controller_server:
       time_steps: 25                     # 预测前瞻步数降为 20 步
       
       batch_size: 800                    # 每次撒出的预测轨迹数
-      vx_std: 0.9                        
+      vx_std: 0.35                       
       vy_std: 0.0                        
-      wz_std: 1.4                        
-      vx_max: 0.8                        # 【猛踩油门】最大线速度提升至 1.5 m/s
-      vx_min: -0.6                       # 【倒车动力】保障小车有足够的倒车速度
+      wz_std: 0.8                        
+      vx_max: 0.55                       # 中档线速度
+      vx_min: -0.30                      # 中档倒车速度
       vy_max: 0.0
-      wz_max: 2.0                        # 【敏捷转向】最大角速度提升至 1.5
-      ax_max: 2.5                        # 【推背感】提升起步加速度
-      ax_min: -2.5                       # 【急刹车】增强刹车制动力度
-      az_max: 4                        # 【快速回正】提升转向加速度
+      wz_max: 1.5                        # 保留基本转向能力
+      ax_max: 1.5                        # 中档起步加速度
+      ax_min: -1.5                       # 中档减速度
+      az_max: 2.0                        # 限制转向加速度
       temperature: 0.3                   
       gamma: 0.015                       
       iteration_count: 1
@@ -155,7 +155,9 @@ controller_server:
         critical_weight: 20.0            
         consider_footprint: true
         collision_cost: 10000.0          
-        collision_margin_distance: 0.09  
+        collision_margin_distance: 0.10
+        inflation_radius: 0.20
+        cost_scaling_factor: 12.0
         near_goal_distance: 0.5
       PathAlignCritic:
         cost_power: 1
@@ -195,7 +197,7 @@ local_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.16                          
+        inflation_radius: 0.20
         cost_scaling_factor: 12.0                        
 
       obstacle_layer:
@@ -239,7 +241,7 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.16                          
+        inflation_radius: 0.20
         cost_scaling_factor: 12.0                        
 
       static_layer:
@@ -381,10 +383,10 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     # 【全面放大平滑漏斗】匹配局部控制器的极限冲刺与倒车
-    max_velocity: [1.2, 0.0, 3.0]
-    min_velocity: [-0.8, 0.0, -2.0]
-    max_accel: [2.5, 0.0, 4.0]
-    max_decel: [-2.5, 0.0, -4.0]
+    max_velocity: [0.6, 0.0, 1.8]
+    min_velocity: [-0.30, 0.0, -1.3]
+    max_accel: [1.5, 0.0, 2.0]
+    max_decel: [-1.8, 0.0, -2.5]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

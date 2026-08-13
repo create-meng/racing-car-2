@@ -9,10 +9,10 @@
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="0.333">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
-            <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
+            <Fallback name="ComputeOrKeepCurrentPath">
               <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-            </ReactiveSequence>
+              <IsPathValid path="{path}"/>
+            </Fallback>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </RateController>
@@ -30,7 +30,7 @@
           </Sequence>
           <Spin spin_dist="1.57"/>
           <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+          <BackUp backup_dist="0.15" backup_speed="0.05"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

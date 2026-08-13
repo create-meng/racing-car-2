@@ -8,11 +8,11 @@ ros2 launch lslidar_driver lsn10_launch.py #启动雷达
 
 cd /root/ros2_ws/
 source install/setup.bash
-ros2 launch deptrum-ros-driver-aurora930 aurora930_launch.py  #启动深度相机
+ros2 launch racecar Run_nav.launch.py  #启动nav2导航节点
 
 cd /root/ros2_ws/
 source install/setup.bash
-ros2 launch racecar Run_nav.launch.py  #启动nav2导航节点
+ros2 launch deptrum-ros-driver-aurora930 aurora930_launch.py  #启动深度相机
 
 rviz2 #打开rviz2
 
