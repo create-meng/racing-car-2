@@ -5,26 +5,22 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional until pip install
     load_dotenv = None
 
+# 单一固定来源：.env 由 CMake 安装到本包的 ROS share 目录，
+# 运行时通过 ament index 定位，不依赖 __file__/cwd 猜测，任何构建方式都稳定。
+ENV_FILENAME = '.env'
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-PACKAGE_ROOT = PACKAGE_DIR.parent
 
+def env_file_path() -> Path:
+    from ament_index_python.packages import get_package_share_directory
 
-def _candidate_env_paths() -> Iterable[Path]:
-    explicit = os.environ.get('VOICE_ENV_FILE', '').strip()
-    if explicit:
-        yield Path(explicit)
-    yield PACKAGE_ROOT / '.env'
-    yield PACKAGE_ROOT / '.env copy.example'
-    yield PACKAGE_ROOT.parent.parent / '.env'
-    yield Path.cwd() / '.env'
+    share_dir = Path(get_package_share_directory('voice_driver'))
+    return share_dir / ENV_FILENAME
 
 
 def _load_env_file(path: Path) -> None:
@@ -40,15 +36,23 @@ def _load_env_file(path: Path) -> None:
 
 
 def load_env() -> None:
-    """Load the first existing .env file from known locations."""
-    for path in _candidate_env_paths():
-        if not path.is_file():
-            continue
-        if load_dotenv is not None:
-            load_dotenv(path, override=False)
-        else:
-            _load_env_file(path)
-        return
+    """Load the package .env from the ament share directory."""
+    try:
+        path = env_file_path()
+    except Exception as exc:  # noqa: BLE001 - ament_index not sourced
+        raise RuntimeError(
+            '无法定位 voice_driver 的 .env：先 source install/setup.bash '
+            '并确认已执行 colcon build --packages-select voice_driver'
+        ) from exc
+    if not path.is_file():
+        raise FileNotFoundError(
+            f'找不到语音配置 {path}，请执行: '
+            'colcon build --packages-select voice_driver'
+        )
+    if load_dotenv is not None:
+        load_dotenv(path, override=False)
+    else:
+        _load_env_file(path)
 
 
 def _get(name: str, default: str = '') -> str:

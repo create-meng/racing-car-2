@@ -4,7 +4,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String  # 必须是String！
 from nav2_msgs.action import NavigateThroughPoses
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from visualization_msgs.msg import Marker
 import csv
 import os
@@ -43,6 +43,14 @@ class NavThroughPosesClient(Node):
         self.loop_poses = None      # 循环全量路点 (PoseStamped 列表)
         self.loop_total = 0         # 循环总路点数（步骤B 用于拍照计数）
         self.phase2_step = 0        # 0=步骤A(回正航向,单首点) 1=步骤B(整圈)
+        self.phase2_retries = 0     # 步骤B 失败自动重试计数（临时 lethal 误判时继续走）
+        self._last_visited = 0      # 最近一次到达的路点计数（用于失败后从中断处继续）
+
+        # --- 卡点看门狗：5s 无进展就主动取消目标，跳过当前路点继续走，不等 Nav2 磨蹭 ---
+        self._goal_active = False            # 当前是否有执行中的目标
+        self._last_progress = self.get_clock().now()   # 最近一次"有进展"的时刻
+        self._last_remaining = float('inf')  # 上一次反馈的剩余距离
+        self.watchdog_timer = self.create_timer(1.0, self.watchdog_tick)
 
         # 二维码接收
         self.qr_result = None
@@ -180,16 +188,22 @@ class NavThroughPosesClient(Node):
     def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("路点任务被拒绝！")
+            self.get_logger().error("路点任务被拒绝！按失败推进状态机，避免卡死")
+            self.get_result_callback(None)
             return
 
         self._goal_handle = goal_handle # 保存当前句柄
         self.get_logger().info("路点任务已接受！")
         self.log_amcl("任务开始")
+        # 重置看门狗计时
+        self._goal_active = True
+        self._last_progress = self.get_clock().now()
+        self._last_remaining = float('inf')
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
+        self._goal_active = False  # 看门狗：当前目标已结束
         # 第一阶段(dating.csv)结束或被扫码中断 → 进入第二阶段
         if not self.first_phase_done:
             self.first_phase_done = True
@@ -206,6 +220,8 @@ class NavThroughPosesClient(Node):
             if status == 4:
                 self.get_logger().info("已到第一个路点，航向回正，开始正着跑完整圈")
                 self.phase2_step = 1
+                self.phase2_retries = 0
+                self._last_visited = 1
                 self.total_poses = self.loop_total
                 self.photo_triggered = False
                 self.send_goal(self.loop_poses[1:])
@@ -219,13 +235,30 @@ class NavThroughPosesClient(Node):
                 self.send_goal(self.loop_poses)
         else:
             # 步骤B（整圈）结束
-            self.get_logger().info("所有路点导航完成！")
-            rclpy.shutdown()
+            if status == 4:
+                self.get_logger().info("所有路点导航完成！")
+                rclpy.shutdown()
+            else:
+                # 卡墙/取消 → 跳过当前不可达路点，继续下一个
+                start = max(1, self._last_visited) + 1
+                if start >= self.loop_total:
+                    self.get_logger().info("所有路点已完成！")
+                    rclpy.shutdown()
+                    return
+                self._last_visited = start
+                self.get_logger().warn(
+                    f"卡墙，跳过第 {start-1} 个路点，从第 {start} 个继续走（共 {self.loop_total} 点）")
+                self.total_poses = self.loop_total
+                self.photo_triggered = False
+                # 短暂等待后重新规划
+                for _ in range(5):
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                self.send_goal(self.loop_poses[start:])
 
     def execute_next_phase(self):
         if self.qr_result is None:
             self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别...")
-            for i in range(100):
+            for i in range(200):
                 if self.qr_result is not None:
                     break
                 rclpy.spin_once(self, timeout_sec=0.1)
@@ -263,6 +296,10 @@ class NavThroughPosesClient(Node):
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
         remaining = feedback.distance_remaining
+        # 看门狗：剩余距离下降 = 有进展，刷新计时
+        if remaining < self._last_remaining:
+            self._last_progress = self.get_clock().now()
+        self._last_remaining = remaining
         if self.total_poses > 0:
             visited = self.total_poses - feedback.number_of_poses_remaining
             self.get_logger().info(
@@ -286,6 +323,15 @@ class NavThroughPosesClient(Node):
                 self.text_pub.publish(msg)
                 self.photo_triggered = True
                 self.get_logger().info(f"已到达第 {self.trigger_point} 个点，触发拍照")
+
+    def watchdog_tick(self):
+        """1Hz 看门狗：目标在执行但 5s 无进展 → 主动取消，跳过该路点继续走。"""
+        if not self._goal_active or self._goal_handle is None:
+            return
+        if (self.get_clock().now() - self._last_progress).nanoseconds > 5e9:
+            self.get_logger().warn("看门狗：5s 无进展，主动取消当前目标以继续走")
+            self._goal_handle.cancel_goal_async()
+            self._last_progress = self.get_clock().now()
 
 def main(args=None):
     rclpy.init(args=args)

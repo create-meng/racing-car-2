@@ -40,6 +40,10 @@ install(PROGRAMS
   RENAME voice_speak_text
 )
 
+install(FILES .env
+  DESTINATION share/${PROJECT_NAME}
+)
+
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
   OPTIONAL
