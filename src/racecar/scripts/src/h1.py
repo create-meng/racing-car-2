@@ -39,6 +39,11 @@ class NavThroughPosesClient(Node):
         self.trigger_point = 0
         self.first_phase_done = False  # 标记第一阶段(dating.csv)是否完成
 
+        # 第二阶段(循环)状态：步骤A 先到第一个路点回正航向，步骤B 再正着跑完整圈
+        self.loop_poses = None      # 循环全量路点 (PoseStamped 列表)
+        self.loop_total = 0         # 循环总路点数（步骤B 用于拍照计数）
+        self.phase2_step = 0        # 0=步骤A(回正航向,单首点) 1=步骤B(整圈)
+
         # 二维码接收
         self.qr_result = None
         self.qr_sub = self.create_subscription(
@@ -129,6 +134,21 @@ class NavThroughPosesClient(Node):
                     waypoints.append((x, y, z, w))
         return waypoints
 
+    def build_poses(self, wp_list):
+        """把 (x,y,z,w) 四元组列表构造成 PoseStamped 列表。"""
+        poses = []
+        for x, y, z, w in wp_list:
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.z = z
+            pose.pose.orientation.w = w
+            poses.append(pose)
+        return poses
+
     def send_goal(self, poses):
         safe_poses = []
         for i, pose in enumerate(poses):
@@ -170,10 +190,35 @@ class NavThroughPosesClient(Node):
         self._get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
+        # 第一阶段(dating.csv)结束或被扫码中断 → 进入第二阶段
         if not self.first_phase_done:
             self.first_phase_done = True
             self.execute_next_phase()
+            return
+
+        # ---- 第二阶段状态机 ----
+        status = None
+        if future is not None and future.result() is not None:
+            status = future.result().status  # goal_status: 4=SUCCEEDED
+
+        if self.phase2_step == 0:
+            # 步骤A（先到第一个路点回正航向）结束
+            if status == 4:
+                self.get_logger().info("已到第一个路点，航向回正，开始正着跑完整圈")
+                self.phase2_step = 1
+                self.total_poses = self.loop_total
+                self.photo_triggered = False
+                self.send_goal(self.loop_poses[1:])
+            else:
+                # 失败/被取消/空目标 → 回退为整圈全量路点方式，保证任务不卡死
+                self.get_logger().warn(
+                    f"步骤A(回正航向)未成功(status={status})，回退为整圈全量路点方式")
+                self.phase2_step = 1
+                self.total_poses = self.loop_total
+                self.photo_triggered = False
+                self.send_goal(self.loop_poses)
         else:
+            # 步骤B（整圈）结束
             self.get_logger().info("所有路点导航完成！")
             rclpy.shutdown()
 
@@ -193,29 +238,27 @@ class NavThroughPosesClient(Node):
         self.get_logger().info(f"使用二维码结果：{self.qr_result}")
 
         if self.qr_result % 2 == 1:
-            self.get_logger().info("奇数：执行 shunshizhen1.csv，到达第 20 个点后触发拍照")
+            self.get_logger().info("奇数：执行 shunshizhen1.csv（顺时针循环）")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/shunshizhen1.csv")
-            self.trigger_point = 15
         else:
-            self.get_logger().info("偶数：执行 test_1.csv，到达第 34 个点后触发拍照")
+            self.get_logger().info("偶数：执行 test_1.csv（逆时针循环）")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
-            self.trigger_point = 34
 
-        next_poses = []
-        for x, y, z, w in next_wp:
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.z = z
-            pose.pose.orientation.w = w
-            next_poses.append(pose)
+        # 拍照触发点：倒数第 2 个路点（保持原 shunshizhen1=15 语义，对两个循环都自适应）
+        self.trigger_point = len(next_wp) - 1
+        self.get_logger().info(f"循环共 {len(next_wp)} 个路点，到达第 {self.trigger_point} 个点后触发拍照")
 
-        self.total_poses = len(next_poses)
-        self.photo_triggered = False
-        self.send_goal(next_poses)
+        # 构建循环全量路点
+        self.loop_poses = self.build_poses(next_wp)
+        self.loop_total = len(self.loop_poses)
+
+        # 步骤A：先只发第一个路点，强制到点后回正航向（对准循环前进方向）
+        # 步骤A期间 total_poses=1 且抑制拍照，避免误触发
+        self.phase2_step = 0
+        self.photo_triggered = True
+        self.total_poses = 1
+        self.get_logger().info(f"步骤A：先导航到循环第一个路点以回正航向（共 {self.loop_total} 个点）")
+        self.send_goal(self.loop_poses[:1])
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
