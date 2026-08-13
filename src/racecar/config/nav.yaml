@@ -233,8 +233,8 @@ global_costmap:
       use_sim_time: false
       rolling_window: false
       resolution: 0.06
-      robot_radius: 0.01
-      footprint: "[ [0.0, 0.0] ]"
+      robot_radius: 0.15
+      footprint: "[ [-0.15, -0.10], [-0.15, 0.10], [0.25, 0.10], [0.25, -0.10] ]"
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"] 
 
       inflation_layer:
@@ -292,7 +292,7 @@ planner_server:
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       tolerance: 1.5
-      allow_unknown: false
+      allow_unknown: true
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 1.0                            
