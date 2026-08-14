@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from sensor_msgs.msg import Imu
 import numpy as np
@@ -12,7 +13,8 @@ class LaserLocalization(Node):
         super().__init__('laser_localization_node')
 
         # 订阅
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.scan_sub = self.create_subscription(
+            LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
         self.imu_sub = self.create_subscription(Imu, '/imu/data', self.imu_callback, 10)
 
         # 雷达参数

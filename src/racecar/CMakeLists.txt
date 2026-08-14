@@ -76,6 +76,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python executables
 install(PROGRAMS
   scripts/racecar_teleop.py
+  scripts/static_wall_scan_filter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(PROGRAMS

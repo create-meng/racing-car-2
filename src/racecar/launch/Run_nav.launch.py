@@ -8,7 +8,9 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
-    use_composition = LaunchConfiguration('use_composition', default='False')
+    # 组合模式下定位生命周期与 Nav2 节点共享隔离容器，避免独立进程启动时
+    # map_server/change_state 在资源竞争下超时。
+    use_composition = LaunchConfiguration('use_composition', default='True')
 
         
     # nav_dir = get_package_share_directory('racecar')
@@ -42,7 +44,7 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'use_composition',
-            default_value='False',
+            default_value='True',
             description='Use a shared Nav2 component container'),
         
 
@@ -57,6 +59,25 @@ def generate_launch_description():
             cmd=['python3', trigger_monitor_script],
             name='trigger_monitor',
             output='screen',
+        ),
+
+        Node(
+            package='racecar',
+            executable='static_wall_scan_filter.py',
+            name='static_wall_scan_filter',
+            output='screen',
+            parameters=[{
+                'scan_topic': '/scan',
+                'filtered_topic': '/scan_nav',
+                'map_topic': '/map',
+                'map_frame': 'map',
+                'match_tolerance': 0.10,
+                'map_cell_radius': 1,
+                'occupied_threshold': 65,
+                'max_tf_age': 0.35,
+                'odom_frame': 'odom_combined',
+                'max_map_odom_age': 2.0,
+            }],
         ),
 
         IncludeLaunchDescription(

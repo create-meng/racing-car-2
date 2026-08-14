@@ -22,7 +22,9 @@ class NavThroughPosesClient(Node):
     FINAL_RETURN_X = 0.0
     FINAL_RETURN_Y = 0.1
     POINT_REACHED_RADIUS = 0.30
-    ESCAPE_COST = 254
+    # 253 表示车体已进入 inscribed 区，必须提前脱困；254 仍是硬碰撞边界。
+    ESCAPE_TRIGGER_COST = 253
+    ESCAPE_BLOCK_COST = 254
     ESCAPE_CONFIRMATIONS = 3
     ESCAPE_SPEED = -0.05
     ESCAPE_DISTANCE = 0.15
@@ -65,6 +67,8 @@ class NavThroughPosesClient(Node):
         self._active_route_offset = 0
         self._dating_route_poses = []
         self._first_phase_retry_timer = None
+        self._goal_retry_timer = None
+        self._pending_goal_poses = None
 
         # 订阅 AMCL 定位，用于记录实际位姿到日志
         self.amcl_pose = None
@@ -173,7 +177,7 @@ class NavThroughPosesClient(Node):
             return
 
         cost = self.local_footprint_cost(costmap)
-        if cost is None or cost < self.ESCAPE_COST:
+        if cost is None or cost < self.ESCAPE_TRIGGER_COST:
             self._costmap_escape_hits = 0
             self._escape_requires_clear = False
             return
@@ -194,8 +198,13 @@ class NavThroughPosesClient(Node):
             return
 
         self._escape_requires_clear = True
+        level = "inscribed" if cost < self.ESCAPE_BLOCK_COST else "lethal"
+        front_clearance = self.scan_clearance(True)
+        rear_clearance = self.scan_clearance(False)
         self.request_qr_escape(
-            f"footprint 连续 {self._costmap_escape_hits} 帧进入 lethal 代价 {cost}"
+            f"footprint 连续 {self._costmap_escape_hits} 帧进入 {level} 代价 {cost}，"
+            f"前={front_clearance if front_clearance is not None else '--'}m，"
+            f"后={rear_clearance if rear_clearance is not None else '--'}m"
         )
 
     def scan_clearance(self, forward):
@@ -233,7 +242,7 @@ class NavThroughPosesClient(Node):
             return False, "无 base_footprint TF"
         x, y, yaw = pose
         current_costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
-        current_inscribed = sum(cost >= self.ESCAPE_COST for cost in current_costs)
+        current_inscribed = sum(cost >= self.ESCAPE_TRIGGER_COST for cost in current_costs)
         step_distance = 0.025
         for _ in range(int(self.ESCAPE_DISTANCE / step_distance)):
             dt = step_distance / abs(speed)
@@ -241,9 +250,9 @@ class NavThroughPosesClient(Node):
             y += speed * math.sin(yaw) * dt
             yaw += turn * dt
             costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
-            if not costs or max(costs) >= 254:
+            if not costs or max(costs) >= self.ESCAPE_BLOCK_COST:
                 return False, f"{direction}弧线进入 lethal"
-            if sum(cost >= self.ESCAPE_COST for cost in costs) > current_inscribed:
+            if sum(cost >= self.ESCAPE_TRIGGER_COST for cost in costs) > current_inscribed:
                 return False, f"{direction}弧线更深入障碍"
         return True, ""
 
@@ -363,12 +372,24 @@ class NavThroughPosesClient(Node):
             self.get_result_callback(None)
             return
 
+        # Nav2 启动期间 action server 可能尚未 active，不能只等待一次后永久丢失路线。
+        # 保存整段目标，由定时器在定位和 action server 就绪后重发。
+        if self.amcl_pose is None:
+            self._pending_goal_poses = list(safe_poses)
+            self._start_goal_retry_timer("等待 AMCL 定位")
+            return
+
         goal_msg = NavigateThroughPoses.Goal()
         goal_msg.poses = safe_poses
 
-        if not self._action_client.wait_for_server(timeout_sec=10.0):
-            self.get_logger().error("navigate_through_poses 服务未就绪，未发送首阶段目标")
+        if not self._action_client.wait_for_server(timeout_sec=0.5):
+            self._pending_goal_poses = list(safe_poses)
+            self._start_goal_retry_timer("等待 navigate_through_poses 服务")
             return
+        self._pending_goal_poses = None
+        if self._goal_retry_timer is not None:
+            self._goal_retry_timer.cancel()
+            self._goal_retry_timer = None
         self.get_logger().info("发送安全路点，共 {0} 个".format(len(safe_poses)))
         self._goal_pending = True
         self._first_phase_cancel_requested = False
@@ -377,6 +398,21 @@ class NavThroughPosesClient(Node):
             feedback_callback=self.feedback_callback
         )
         self._send_goal_future.add_done_callback(self.goal_response_callback)
+
+    def _start_goal_retry_timer(self, reason):
+        if self._goal_retry_timer is None:
+            self.get_logger().warn(f"[启动门控] {reason}，路线暂存，Nav2 就绪后自动发送")
+            self._goal_retry_timer = self.create_timer(1.0, self._retry_pending_goal)
+
+    def _retry_pending_goal(self):
+        if self._pending_goal_poses is None:
+            if self._goal_retry_timer is not None:
+                self._goal_retry_timer.cancel()
+                self._goal_retry_timer = None
+            return
+        if self._goal_handle is not None or self._goal_pending:
+            return
+        self.send_goal(self._pending_goal_poses)
 
     def route_poses(self):
         return self._qr_route_poses if self.first_phase_done else self._dating_route_poses
@@ -490,6 +526,17 @@ class NavThroughPosesClient(Node):
         else:
             self._escape_speed = selected_speed
             self._qr_escape_turn = selected_turn
+            # 后方空间足够时多退一点；空间紧时保留最小脱困距离，不能越过后方障碍。
+            if selected_speed < 0.0:
+                rear_clearance = self.scan_clearance(False)
+                if rear_clearance is not None:
+                    self._qr_escape_distance = min(
+                        0.35, max(0.22, rear_clearance - 0.10)
+                    )
+                else:
+                    self._qr_escape_distance = 0.22
+            else:
+                self._qr_escape_distance = 0.22
         motion = (
             "前进转向" if self._escape_speed > 0.0
             else "倒车转向" if self._escape_speed < 0.0
@@ -573,6 +620,7 @@ class NavThroughPosesClient(Node):
         self._escape_speed = 0.0
         self._qr_escape_turn = 0.0
         self._escape_preferred_turn = 0.0
+        self._qr_escape_distance = 0.22
         self._escape_wait_logged_at = None
 
     def resend_qr_route(self):
@@ -681,7 +729,7 @@ class NavThroughPosesClient(Node):
                     self.local_footprint_cost(self._local_costmap)
                     if self._local_costmap is not None else None
                 )
-                if local_cost is None or local_cost < self.ESCAPE_COST:
+                if local_cost is None or local_cost < self.ESCAPE_BLOCK_COST:
                     self.get_logger().warn(
                         f"dating.csv 规划 ABORTED，但局部车体代价={local_cost}，"
                         f"{self.FIRST_PHASE_RETRY_DELAY:.1f}s 后重试"

@@ -1042,7 +1042,10 @@ namespace lslidar_driver
 					}
 					else
 					{
-						scan->header.stamp = this->now(); // timestamp will obtained from sweep data stamp
+						// Use the completed sweep timestamp, not publication time.  Using
+						// now() dates the scan after AMCL's map->odom TF and causes
+						// future extrapolation in costmap consumers.
+						scan->header.stamp = start_time;
 					}
 
 					scan->angle_min = 0;
@@ -1191,7 +1194,8 @@ namespace lslidar_driver
 					}
 					else
 					{
-						scan->header.stamp = this->now(); // timestamp will obtained from sweep data stamp
+						// Keep LaserScan time aligned with acquisition/completed sweep time.
+						scan->header.stamp = start_time;
 					}
 
 					if (angle_able_max > 360)

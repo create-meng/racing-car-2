@@ -66,7 +66,7 @@ class TriggerMonitor(Node):
         costmap_qos = QoSProfile(
             depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
         )
         map_qos = QoSProfile(
@@ -76,6 +76,15 @@ class TriggerMonitor(Node):
             history=HistoryPolicy.KEEP_LAST,
         )
         cmd_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        # AMCL pose and waypoint goals are live state topics, not latched data.
+        # A volatile subscriber also remains compatible if a publisher uses
+        # transient-local durability, while the reverse is not true.
+        live_reliable_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -99,12 +108,18 @@ class TriggerMonitor(Node):
                 PoseWithCovarianceStamped,
                 "/amcl_pose",
                 self.cb_amcl,
-                costmap_qos,
+                live_reliable_qos,
             )
             self.create_subscription(
                 LaserScan,
                 "/scan",
                 self.cb_scan,
+                qos_profile_sensor_data,
+            )
+            self.create_subscription(
+                LaserScan,
+                "/scan_nav",
+                self.cb_nav_scan,
                 qos_profile_sensor_data,
             )
             self.create_subscription(
@@ -117,7 +132,7 @@ class TriggerMonitor(Node):
                 PoseStamped,
                 "/goal_pose",
                 self.cb_goal,
-                costmap_qos,
+                live_reliable_qos,
             )
             self.create_subscription(
                 Twist,
@@ -149,6 +164,8 @@ class TriggerMonitor(Node):
         self.latest_scan = None
         self.scan_last_wall = None
         self.scan_period = None
+        self.nav_scan_count = 0
+        self.nav_scan_age = None
         self.odom_count = 0
         self.odom_last_wall = None
         self.odom_age = None
@@ -178,7 +195,7 @@ class TriggerMonitor(Node):
         )
         self.log(
             "订阅: /global_costmap/costmap_raw  /local_costmap/costmap_raw  "
-            "/map  /amcl_pose  /scan  /goal_pose  /cmd_vel"
+            "/map  /amcl_pose  /scan  /scan_nav  /goal_pose  /cmd_vel"
         )
         self.log("=" * 70)
 
@@ -255,6 +272,13 @@ class TriggerMonitor(Node):
         if stamp.sec or stamp.nanosec:
             now = self.get_clock().now().nanoseconds
             self.scan_age = (now - stamp.sec * 1_000_000_000 - stamp.nanosec) / 1_000_000_000
+
+    def cb_nav_scan(self, msg):
+        self.nav_scan_count += 1
+        stamp = msg.header.stamp
+        if stamp.sec or stamp.nanosec:
+            now = self.get_clock().now().nanoseconds
+            self.nav_scan_age = (now - stamp.sec * 1_000_000_000 - stamp.nanosec) / 1_000_000_000
 
     def cb_odom(self, msg):
         self.odom_count += 1
@@ -414,6 +438,8 @@ class TriggerMonitor(Node):
         entry["l_fp_costs"] = self.footprint_costs(self.local_costmap)
         entry["static_fp_costs"] = self.footprint_costs(self.static_map)
         entry["scan_age"] = self.scan_age
+        entry["scan_nav_count"] = self.nav_scan_count
+        entry["scan_nav_age"] = self.nav_scan_age
         entry["scan_frame"] = self.scan_frame
         entry["scan_valid"] = self.scan_valid
         entry["scan_count"] = self.scan_count
@@ -487,6 +513,8 @@ class TriggerMonitor(Node):
             f"scan_min={f'{self.scan_min:.2f}' if self.scan_min else '--'} "
             f"scan_nearest={nearest} sectors=({sectors}) "
             f"scan_age={f'{self.scan_age:.2f}s' if self.scan_age is not None else '--'} "
+            f"scan_nav_rx={self.nav_scan_count} "
+            f"scan_nav_age={f'{self.nav_scan_age:.2f}s' if self.nav_scan_age is not None else '--'} "
             f"scan_frame={self.scan_frame} valid={self.scan_valid} "
             f"scan_rx={self.scan_count} period={f'{self.scan_period:.3f}s' if self.scan_period else '--'} "
             f"costmap_rx=(g:{self.global_costmap_count},l:{self.local_costmap_count}) "
