@@ -2,8 +2,9 @@
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String  # 必须是String！
-from nav2_msgs.action import NavigateThroughPoses
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
 from action_msgs.msg import GoalStatus
@@ -14,10 +15,21 @@ import math
 
 
 class NavThroughPosesClient(Node):
+    ROUTE_GOAL_RADIUS = 0.15
+    FINAL_RETURN_X = 0.0
+    FINAL_RETURN_Y = 0.1
+    ROUTE_WAYPOINT_TIMEOUT = 30.0
+    ROUTE_NO_PROGRESS_TIMEOUT = 12.0
+    ROUTE_PROGRESS_DISTANCE = 0.05
+
     def __init__(self):
         super().__init__('nav_through_poses_client')
         self._action_client = ActionClient(self, NavigateThroughPoses, 'navigate_through_poses')
         self._goal_handle = None # 用于记录当前任务句柄
+        self._goal_pending = False  # 首阶段目标已发送，但服务端尚未返回句柄
+        self._first_phase_cancel_requested = False
+        self._route_action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._route_goal_handle = None
 
         # 订阅 AMCL 定位，用于记录实际位姿到日志
         self.amcl_pose = None
@@ -25,7 +37,11 @@ class NavThroughPosesClient(Node):
             PoseWithCovarianceStamped,
             "/amcl_pose",
             self.amcl_callback,
-            10,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
         )
 
         self.marker_pub = self.create_publisher(Marker, "/forbidden_zone_marker", 10)
@@ -40,6 +56,17 @@ class NavThroughPosesClient(Node):
         self.trigger_point = 0
         self._last_visited = None
         self.first_phase_done = False
+        self.route_poses = []
+        self.route_index = 0
+        self.route_reached = []
+        self.route_skipped = []
+        self.route_goal_started_at = None
+        self.route_last_motion_at = None
+        self.route_last_amcl_xy = None
+        self.route_canceling = False
+        self.route_skip_reason = None
+        self.route_last_feedback_at = 0.0
+        self.route_watchdog = self.create_timer(1.0, self.route_watchdog_callback)
         # 二维码接收
         self.qr_result = None
         self.qr_sub = self.create_subscription(
@@ -88,8 +115,9 @@ class NavThroughPosesClient(Node):
             self.get_logger().info(f"【收到二维码】识别到数字 {self.qr_result}")
             if self._goal_handle is not None and not self.first_phase_done:
                 self.get_logger().info("正在执行 dating.csv，取消当前任务并切换二维码路线")
-                cancel_future = self._goal_handle.cancel_goal_async()
-                cancel_future.add_done_callback(self.cancel_response_callback)
+                self.cancel_first_phase_goal()
+            elif self._goal_pending and not self.first_phase_done:
+                self.get_logger().info("首阶段目标仍在等待 Nav2 接受，接受后立即取消并切换二维码路线")
             elif self.first_phase_done:
                 self.execute_next_phase()
 
@@ -148,9 +176,12 @@ class NavThroughPosesClient(Node):
         goal_msg = NavigateThroughPoses.Goal()
         goal_msg.poses = safe_poses
 
-        self._action_client.wait_for_server(timeout_sec=10.0)
+        if not self._action_client.wait_for_server(timeout_sec=10.0):
+            self.get_logger().error("navigate_through_poses 服务未就绪，未发送首阶段目标")
+            return
         self.get_logger().info("发送安全路点，共 {0} 个".format(len(safe_poses)))
-        
+        self._goal_pending = True
+        self._first_phase_cancel_requested = False
         self._send_goal_future = self._action_client.send_goal_async(
             goal_msg,
             feedback_callback=self.feedback_callback
@@ -158,13 +189,27 @@ class NavThroughPosesClient(Node):
         self._send_goal_future.add_done_callback(self.goal_response_callback)
 
     def goal_response_callback(self, future):
-        goal_handle = future.result()
+        self._goal_pending = False
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"首阶段目标响应异常：{exc}")
+            if self.qr_result is not None and not self.first_phase_done:
+                self.first_phase_done = True
+                self.execute_next_phase()
+            return
         if not goal_handle.accepted:
             self.get_logger().error("路点任务被拒绝！")
+            if self.qr_result is not None and not self.first_phase_done:
+                self.first_phase_done = True
+                self.execute_next_phase()
             return
 
         self._goal_handle = goal_handle # 保存当前句柄
         self.get_logger().info("路点任务已接受！")
+        if self.qr_result is not None and not self.first_phase_done:
+            self.get_logger().info("检测到二维码已提前到达，目标接受后立即取消首阶段任务")
+            self.cancel_first_phase_goal()
         self.log_amcl("任务开始")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
@@ -177,8 +222,17 @@ class NavThroughPosesClient(Node):
         except Exception as exc:
             self.get_logger().error(f"取消请求失败：{exc}")
 
+    def cancel_first_phase_goal(self):
+        if self._goal_handle is None or self._first_phase_cancel_requested:
+            return
+        self._first_phase_cancel_requested = True
+        self.get_logger().info("首阶段取消请求已发送")
+        cancel_future = self._goal_handle.cancel_goal_async()
+        cancel_future.add_done_callback(self.cancel_response_callback)
+
     def get_result_callback(self, future):
         self._goal_handle = None
+        self._goal_pending = False
         status = future.result().status
         status_names = {
             GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
@@ -230,22 +284,204 @@ class NavThroughPosesClient(Node):
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
             self.trigger_point = 34
 
-        next_poses = []
-        for x, y, z, w in next_wp:
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.z = z
-            pose.pose.orientation.w = w
-            next_poses.append(pose)
-
-        self.total_poses = len(next_poses)
+        self.route_poses = [self.make_pose(x, y, z, w) for x, y, z, w in next_wp]
+        self.total_poses = len(self.route_poses)
         self.photo_triggered = False
-        self._last_visited = None
-        self.send_goal(next_poses)
+        self.route_index = 0
+        self.route_reached = []
+        self.route_skipped = []
+        self.get_logger().info(
+            f"二维码路线逐点导航启动：共 {self.total_poses} 个点，完成半径 "
+            f"{self.ROUTE_GOAL_RADIUS:.2f} m"
+        )
+        self.start_next_route_waypoint()
+
+    def make_pose(self, x, y, z, w):
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = 0.0
+        pose.pose.orientation.z = z
+        pose.pose.orientation.w = w
+        return pose
+
+    def now_seconds(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def start_next_route_waypoint(self):
+        if self.route_index >= self.total_poses:
+            self.finish_route()
+            return
+
+        pose = self.route_poses[self.route_index]
+        is_final_return = (
+            self.qr_result is not None
+            and self.qr_result % 2 == 1
+            and self.route_index == self.total_poses - 1
+        )
+        if is_final_return and self.amcl_pose is not None:
+            current_x, current_y, _ = self.amcl_pose
+            if 0.0 <= current_x <= 0.5 and 0.0 <= current_y <= 0.3:
+                self.get_logger().info(
+                    f"[主点 {self.route_index + 1}/{self.total_poses}] "
+                    f"AMCL 已在起点完成区域内：x={current_x:.3f} y={current_y:.3f}，"
+                    "不再发送补充目标"
+                )
+                self.complete_route_waypoint()
+                return
+        if is_final_return:
+            pose = self.make_pose(
+                self.FINAL_RETURN_X,
+                self.FINAL_RETURN_Y,
+                pose.pose.orientation.z,
+                pose.pose.orientation.w,
+            )
+            self.get_logger().info(
+                f"[主点 {self.route_index + 1}/{self.total_poses}] "
+                f"最终回起点目标：x={self.FINAL_RETURN_X:.3f} "
+                f"y={self.FINAL_RETURN_Y:.3f}（忽略航向）"
+            )
+        if not self._route_action_client.wait_for_server(timeout_sec=10.0):
+            self.skip_route_waypoint("navigate_to_pose 服务不可用")
+            return
+        self.route_goal_started_at = self.now_seconds()
+        self.route_last_motion_at = self.route_goal_started_at
+        self.route_last_amcl_xy = None if self.amcl_pose is None else self.amcl_pose[:2]
+        self.route_canceling = False
+        self.route_skip_reason = None
+        self.route_last_feedback_at = 0.0
+        self.get_logger().info(
+            f"[主点 {self.route_index + 1}/{self.total_poses}] 开始："
+            f"x={pose.pose.position.x:.3f} y={pose.pose.position.y:.3f}"
+        )
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = pose
+        goal_msg.behavior_tree = "/root/ros2_ws/src/racecar/config/navigate_to_pose_precise.xml"
+        send_future = self._route_action_client.send_goal_async(
+            goal_msg, feedback_callback=self.route_feedback_callback
+        )
+        send_future.add_done_callback(self.route_goal_response_callback)
+
+    def route_goal_response_callback(self, future):
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self.skip_route_waypoint(f"发送目标异常：{exc}")
+            return
+        if not goal_handle.accepted:
+            self.skip_route_waypoint("目标被 Nav2 拒绝")
+            return
+
+        self._route_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self.route_result_callback)
+
+    def route_feedback_callback(self, feedback_msg):
+        feedback = feedback_msg.feedback
+        now = self.now_seconds()
+        if self.route_index >= self.total_poses or now - self.route_last_feedback_at < 1.0:
+            return
+        self.route_last_feedback_at = now
+        self.get_logger().info(
+            f"[主点 {self.route_index + 1}/{self.total_poses}] "
+            f"剩余 {feedback.distance_remaining:.2f} m，恢复 {feedback.number_of_recoveries} 次"
+        )
+
+    def route_result_callback(self, future):
+        self._route_goal_handle = None
+        try:
+            status = future.result().status
+        except Exception as exc:
+            self.skip_route_waypoint(f"获取结果异常：{exc}")
+            return
+
+        if self.route_canceling:
+            self.route_canceling = False
+            self.skip_route_waypoint(self.route_skip_reason or "单点 watchdog 取消")
+            return
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.complete_route_waypoint()
+            return
+
+        status_names = {
+            GoalStatus.STATUS_CANCELED: "CANCELED",
+            GoalStatus.STATUS_ABORTED: "ABORTED",
+        }
+        self.skip_route_waypoint(f"Nav2 返回 {status_names.get(status, status)}")
+
+    def complete_route_waypoint(self):
+        pose = self.route_poses[self.route_index]
+        self.route_reached.append(self.route_index)
+        self.get_logger().info(
+            f"[主点 {self.route_index + 1}/{self.total_poses}] 已到达："
+            f"x={pose.pose.position.x:.3f} y={pose.pose.position.y:.3f}"
+        )
+        if not self.photo_triggered and self.route_index + 1 >= self.trigger_point:
+            msg = String()
+            msg.data = "gaol"
+            self.text_pub.publish(msg)
+            self.photo_triggered = True
+            self.get_logger().info(f"已到达第 {self.trigger_point} 个点，触发拍照")
+        self.route_index += 1
+        self.start_next_route_waypoint()
+
+    def skip_route_waypoint(self, reason):
+        if self.route_index >= self.total_poses:
+            self.finish_route()
+            return
+        pose = self.route_poses[self.route_index]
+        self.route_skipped.append((self.route_index, reason))
+        self.get_logger().warn(
+            f"[主点 {self.route_index + 1}/{self.total_poses}] 跳过：{reason} | "
+            f"x={pose.pose.position.x:.3f} y={pose.pose.position.y:.3f}"
+        )
+        self.route_index += 1
+        self.start_next_route_waypoint()
+
+    def route_watchdog_callback(self):
+        if self._route_goal_handle is None or self.route_canceling:
+            return
+
+        now = self.now_seconds()
+        if self.amcl_pose is not None:
+            current_xy = self.amcl_pose[:2]
+            if self.route_last_amcl_xy is None or math.dist(current_xy, self.route_last_amcl_xy) >= self.ROUTE_PROGRESS_DISTANCE:
+                self.route_last_amcl_xy = current_xy
+                self.route_last_motion_at = now
+
+        if now - self.route_goal_started_at >= self.ROUTE_WAYPOINT_TIMEOUT:
+            self.cancel_route_waypoint(f"总超时 {self.ROUTE_WAYPOINT_TIMEOUT:.0f}s")
+        elif self.amcl_pose is not None and now - self.route_last_motion_at >= self.ROUTE_NO_PROGRESS_TIMEOUT:
+            self.cancel_route_waypoint(f"{self.ROUTE_NO_PROGRESS_TIMEOUT:.0f}s 无进展")
+
+    def cancel_route_waypoint(self, reason):
+        self.route_canceling = True
+        self.route_skip_reason = reason
+        self.get_logger().warn(
+            f"[主点 {self.route_index + 1}/{self.total_poses}] {reason}，取消并继续后续点"
+        )
+        cancel_future = self._route_goal_handle.cancel_goal_async()
+        cancel_future.add_done_callback(self.route_cancel_response_callback)
+
+    def route_cancel_response_callback(self, future):
+        try:
+            count = len(future.result().goals_canceling)
+            if count == 0:
+                self.get_logger().warn("当前主点取消请求未被接受，将等待 Nav2 返回结果")
+        except Exception as exc:
+            self.get_logger().error(f"当前主点取消请求失败：{exc}")
+
+    def finish_route(self):
+        skipped = ", ".join(str(index + 1) for index, _ in self.route_skipped) or "无"
+        self.get_logger().info(
+            f"二维码路线处理结束：到达 {len(self.route_reached)}/{self.total_poses}，"
+            f"跳过 {len(self.route_skipped)} 个（序号：{skipped}）"
+        )
+        rclpy.shutdown()
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback

@@ -66,7 +66,7 @@ class TriggerMonitor(Node):
         costmap_qos = QoSProfile(
             depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
         )
         map_qos = QoSProfile(
