@@ -10,7 +10,7 @@
     lidar_name: N10                                         #雷达选择:M10 M10_P M10_PLUS M10_GPS N10 L10 N10_P
     angle_disable_min: 0.0                                  #角度裁剪开始值
     angle_disable_max: 0.0                                  #角度裁剪结束值
-    min_range: 0.2                                          #雷达接收距离最小值
+    min_range: 0.05                                         #雷达接收距离最小值
     max_range: 7.0                                        #雷达接收距离最大值
     use_gps_ts: false                                       #雷达是否使用GPS授时
     scan_topic: /scan                                       #设置激光数据topic名称

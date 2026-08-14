@@ -75,6 +75,12 @@ class TriggerMonitor(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
         )
+        cmd_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
 
         # ---- 订阅 ----
         try:
@@ -117,7 +123,7 @@ class TriggerMonitor(Node):
                 Twist,
                 "/cmd_vel",
                 self.cb_cmd,
-                costmap_qos,
+                cmd_qos,
             )
         except Exception as e:
             self.log(f"[ERROR] 订阅创建失败: {e}")
@@ -292,11 +298,31 @@ class TriggerMonitor(Node):
             return cm.data[cy * width + cx]
         return None
 
+    def pose_in_costmap_frame(self, cm):
+        """取 base_footprint 在 costmap 坐标系下的位姿。"""
+        if cm is None:
+            return None
+        frame_id = cm.header.frame_id or "map"
+        if frame_id == "map" and self.amcl_pose is not None:
+            return self.amcl_pose
+        try:
+            tf = self.tf_buffer.lookup_transform(frame_id, "base_footprint", Time())
+        except TransformException:
+            return None
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        return t.x, t.y, yaw
+
     def footprint_costs(self, cm):
-        """返回当前矩形足迹覆盖的全部代价格。"""
-        if cm is None or self.amcl_pose is None:
+        """返回当前矩形足迹覆盖的全部代价，自动转换到 costmap 坐标系。"""
+        pose = self.pose_in_costmap_frame(cm)
+        if pose is None:
             return []
-        x, y, yaw = self.amcl_pose
+        x, y, yaw = pose
         info = cm.metadata if isinstance(cm, Costmap) else cm.info
         resolution = info.resolution
         costs = []
@@ -317,13 +343,16 @@ class TriggerMonitor(Node):
             value += step
 
     def nearest_obstacle_local(self):
-        """局部代价地图中最近障碍物距离 (相对于滚动窗中心 = 机器人位置)。"""
+        """局部代价地图中距离当前车体最近的 lethal/inscribed 单元。"""
         cm = self.local_costmap
-        if cm is None:
+        pose = self.pose_in_costmap_frame(cm)
+        if pose is None:
             return None
         res = cm.metadata.resolution
         w, h = cm.metadata.size_x, cm.metadata.size_y
-        cx, cy = w // 2, h // 2
+        o = cm.metadata.origin.position
+        cx = int((pose[0] - o.x) / res)
+        cy = int((pose[1] - o.y) / res)
         best = None
         r_cells = int(5.0 / res)  # 只扫 5m 半径
         y0 = max(0, cy - r_cells)
@@ -339,6 +368,10 @@ class TriggerMonitor(Node):
                     if best is None or d < best:
                         best = d
         return best
+
+    @staticmethod
+    def max_cost(costs):
+        return max(costs) if costs else None
 
     def count_occupied(self, cm):
         """全局 costmap 中占据单元数 (cost >= 250)。"""
@@ -378,6 +411,7 @@ class TriggerMonitor(Node):
             fp = []
         entry["g_cost"] = g
         entry["g_fp_costs"] = fp
+        entry["l_fp_costs"] = self.footprint_costs(self.local_costmap)
         entry["static_fp_costs"] = self.footprint_costs(self.static_map)
         entry["scan_age"] = self.scan_age
         entry["scan_frame"] = self.scan_frame
@@ -397,9 +431,21 @@ class TriggerMonitor(Node):
 
         # ---- 运行检测器 ----
         self.check_lethal_global()
+        self.check_costmap_disagreement(entry["g_fp_costs"], entry["l_fp_costs"])
         self.check_costmap_cleared()
         self.check_obs_spawn(near_obs)
         self.check_cov_spike()
+
+        global_max = self.max_cost(entry["g_fp_costs"])
+        local_max = self.max_cost(entry["l_fp_costs"])
+        if self.amcl_pose is not None and max(global_max or 0, local_max or 0) >= 198:
+            self.log(
+                f"[COST] amcl=({self.amcl_pose[0]:.3f},{self.amcl_pose[1]:.3f}) "
+                f"fp_max=(global:{global_max},local:{local_max},"
+                f"static:{self.max_cost(entry['static_fp_costs'])}) "
+                f"local_nearest={near_obs} cmd=({self.cmd_vel[0]:.3f},{self.cmd_vel[1]:.3f}) "
+                f"tf(map->odom)={self._transform_status('map', 'odom_combined')}"
+            )
 
     def periodic_summary(self):
         now = time.monotonic()
@@ -434,7 +480,9 @@ class TriggerMonitor(Node):
         self.log(
             f"[SUM] amcl=({x:.2f},{y:.2f},{math.degrees(yaw):.1f}°) "
             f"g_cost={g if g is not None else '--'} "
-            f"static_fp={self.footprint_costs(self.static_map)} "
+            f"fp_max=(global:{self.max_cost(self.footprint_costs(self.global_costmap))},"
+            f"local:{self.max_cost(self.footprint_costs(self.local_costmap))},"
+            f"static:{self.max_cost(self.footprint_costs(self.static_map))}) "
             f"near_obs={f'{n:.2f}' if n else '--'} "
             f"scan_min={f'{self.scan_min:.2f}' if self.scan_min else '--'} "
             f"scan_nearest={nearest} sectors=({sectors}) "
@@ -461,8 +509,8 @@ class TriggerMonitor(Node):
         self.log("")
         self.log("!" * 70)
         self.log(f"[TRIGGER][{tag}][{level}] {msg}")
-        if tag == "LETHAL":
-            self.save_lethal_snapshot()
+        if tag in ("LETHAL", "INSCRIBED", "COSTMAP_MISMATCH"):
+            self.save_safety_snapshot(tag)
         self.log("!" * 70)
         self.log(f"---- 触发前状态缓冲 (最近 {len(self.buffer)} 条) ----")
         for i, e in enumerate(self.buffer):
@@ -471,6 +519,7 @@ class TriggerMonitor(Node):
                 f"amcl={e['amcl']} "
                 f"g_cost={e['g_cost']} "
                 f"fp_costs={e['g_fp_costs']} "
+                f"local_fp={e['l_fp_costs']} "
                 f"static_fp={e['static_fp_costs']} "
                 f"near_obs={e['near_obs']} "
                 f"scan_nearest={e['scan_nearest']} sectors={e['scan_sector_min']} "
@@ -534,15 +583,20 @@ class TriggerMonitor(Node):
     def _age_text(age):
         return "--" if age is None else f"{age:.3f}s"
 
-    def save_lethal_snapshot(self):
-        """首次 lethal 时保存原始数据，供事后复现障碍来源。"""
+    def save_safety_snapshot(self, reason):
+        """保存全局/局部代价图和 TF，供核对障碍是否被局部控制忽略。"""
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         scan = self.latest_scan
         snapshot = {
-            "reason": "global footprint contains cost >= 254",
+            "reason": reason,
             "wall_time": datetime.datetime.now().isoformat(),
             "amcl_pose": self.amcl_pose,
             "cmd_vel": self.cmd_vel,
+            "footprint_max": {
+                "global": self.max_cost(self.footprint_costs(self.global_costmap)),
+                "local": self.max_cost(self.footprint_costs(self.local_costmap)),
+                "static": self.max_cost(self.footprint_costs(self.static_map)),
+            },
             "global_costmap_raw": self._costmap_json(self.global_costmap),
             "local_costmap_raw": self._costmap_json(self.local_costmap),
             "scan": None if scan is None else {
@@ -556,13 +610,15 @@ class TriggerMonitor(Node):
             },
             "transforms": [
                 self._transform_json("map", "base_footprint"),
+                self._transform_json("map", "odom_combined"),
+                self._transform_json("odom_combined", "base_footprint"),
                 self._transform_json("base_link", "laser"),
             ],
         }
-        path = os.path.join(SNAPSHOT_DIR, f"lethal_{ts}.json")
+        path = os.path.join(SNAPSHOT_DIR, f"{reason.lower()}_{ts}.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(snapshot, fh, ensure_ascii=False, allow_nan=False)
-        self.log(f"[SNAPSHOT] lethal 原始数据已保存: {path}")
+        self.log(f"[SNAPSHOT] {reason} 原始数据已保存: {path}")
 
     def check_lethal_global(self):
         """检测器 1: 机器人 footprint 在全局图上进入 lethal (>=254)。"""
@@ -590,6 +646,20 @@ class TriggerMonitor(Node):
                 "MEDIUM",
                 f"机器人 footprint 进入 inscribed(253)! "
                 f"cost_max={mx} pose=({x:.2f},{y:.2f})",
+            )
+
+    def check_costmap_disagreement(self, global_costs, local_costs):
+        """全局已判碰撞而局部未判碰撞时，记录是否存在控制地图错位。"""
+        global_max = self.max_cost(global_costs)
+        local_max = self.max_cost(local_costs)
+        if global_max is None or local_max is None:
+            return
+        if global_max >= 253 and local_max < 253:
+            self.trigger(
+                "COSTMAP_MISMATCH",
+                "HIGH",
+                f"全局 footprint={global_max}，局部 footprint={local_max}；"
+                f"局部可能未看到静态墙或 map->odom 错位。"
             )
 
     def check_amcl_jump(self):

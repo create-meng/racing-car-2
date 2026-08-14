@@ -12,7 +12,7 @@ class CmdVel2AckermannDriveNode(Node):
         super().__init__('cmd_vel_to_ackermann_drive')
         self.publisher = self.create_publisher(AckermannDriveStamped, '/ackermann_cmd', QoSProfile(depth=10))
         self.subscription = self.create_subscription(Twist, 'cmd_vel', self.cmd_callback, QoSProfile(depth=10))
-        self.wheelbase = 0.143  #轮距
+        self.wheelbase = 0.189  # 与 origincar URDF/Xacro 轴距一致
         self.frame_id = 'odom_combined'
         self.cmd_angle_instead_rotvel = False
 

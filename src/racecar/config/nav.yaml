@@ -46,7 +46,7 @@ amcl:
     scan_topic: /scan
     set_initial_pose: true
     initial_pose.x: 0.0
-    initial_pose.y: 0.2
+    initial_pose.y: 0.0
     initial_pose.z: 0.0
     initial_pose.yaw: 0.0
 
@@ -105,7 +105,7 @@ controller_server:
 
     precise_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      xy_goal_tolerance: 0.30
       yaw_goal_tolerance: 3.14
       stateful: true
 
@@ -122,17 +122,17 @@ controller_server:
       vx_std: 0.35                       
       vy_std: 0.0                        
       wz_std: 0.8                        
-      vx_max: 0.55                       # 中档线速度
-      vx_min: -0.30                      # 中档倒车速度
+      vx_max: 0.25                       # 降速，给阿克曼底盘更多贴点修正时间
+      vx_min: -0.20                      # 保留倒车能力，同时限制正常倒车速度
       vy_max: 0.0
-      wz_max: 1.5                        # 保留基本转向能力
-      ax_max: 1.5                        # 中档起步加速度
-      ax_min: -1.5                       # 中档减速度
-      az_max: 2.0                        # 限制转向加速度
+      wz_max: 1.0                        # 降低角速度，减少高速甩出路点
+      ax_max: 0.8                        # 降低起步加速度
+      ax_min: -0.8                       # 降低急刹造成的过冲
+      az_max: 1.2                        # 限制转向加速度
       temperature: 0.3                   
       gamma: 0.015                       
       iteration_count: 1
-      prune_distance: 2.5                
+      prune_distance: 1.5
       transform_tolerance: 0.1
       visualize: false                   
 
@@ -149,7 +149,7 @@ controller_server:
         cost_weight: 4.0
       GoalCritic:
         cost_power: 1
-        cost_weight: 5.0
+        cost_weight: 8.0
         threshold_to_consider: 1.4
       GoalAngleCritic:
         cost_power: 1
@@ -159,21 +159,21 @@ controller_server:
         cost_power: 1
         cost_weight: 0.1                 # 【解除倒车封印】极低的前进偏好，允许自由倒车
       ObstaclesCritic:
-        repulsion_weight: 5.0            
-        critical_weight: 20.0            
+        repulsion_weight: 14.0
+        critical_weight: 45.0
         consider_footprint: true
         collision_cost: 10000.0          
-        collision_margin_distance: 0.10
-        inflation_radius: 0.15
-        cost_scaling_factor: 12.0
+        collision_margin_distance: 0.05
+        inflation_radius: 0.20
+        cost_scaling_factor: 10.0
         near_goal_distance: 0.5
       PathAlignCritic:
         cost_power: 1
-        cost_weight: 1.0                
+        cost_weight: 3.0
         max_heuristic_dist: 1.5
       PathFollowCritic:
         cost_power: 1
-        cost_weight: 5.0
+        cost_weight: 12.0
         offset_from_furthest: 20
       PathAngleCritic:
         cost_power: 1
@@ -199,13 +199,18 @@ local_costmap:
       width: 10
       height: 10
       resolution: 0.05                                  
-      footprint: "[ [-0.15, -0.12], [-0.15, 0.12], [0.15, 0.12], [0.15, -0.12] ]"
-      plugins: ["obstacle_layer", "inflation_layer"]
+      footprint: "[ [-0.14, -0.11], [-0.14, 0.11], [0.14, 0.11], [0.14, -0.11] ]"
+      # 局部控制也必须看到静态墙；激光层负责实时障碍，两者叠加。
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.15
-        cost_scaling_factor: 12.0                        
+        inflation_radius: 0.20
+        cost_scaling_factor: 10.0
 
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -242,13 +247,14 @@ global_costmap:
       use_sim_time: false
       rolling_window: false
       resolution: 0.06
-      footprint: "[ [-0.15, -0.12], [-0.15, 0.12], [0.15, 0.12], [0.15, -0.12] ]"
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"] 
+      footprint: "[ [-0.14, -0.11], [-0.14, 0.11], [0.14, 0.11], [0.14, -0.11] ]"
+      # 墙体来自静态图，动态锥桶由激光实时标记和清除，供全局重规划绕行。
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.15
-        cost_scaling_factor: 12.0                        
+        inflation_radius: 0.20
+        cost_scaling_factor: 10.0
 
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -266,8 +272,9 @@ global_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 3.0
-          obstacle_min_range: 0.1
+          obstacle_max_range: 4.5
+          obstacle_min_range: 0.01
+
       always_send_full_costmap: true
 
   global_costmap_client:
@@ -304,7 +311,7 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 1.0                            
-      motion_model_for_search: "REEDS_SHEPP"            
+      motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
       cost_travel_multiplier: 2.0
       
       downsample_costmap: true                          
@@ -313,7 +320,6 @@ planner_server:
 
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      minimum_turning_radius: 0.6                       
       reverse_penalty: 1.0                               # 【降低倒车惩罚】允许全局地图生成向后的绿线
       non_straight_penalty: 30.0
       change_penalty: 20.0                              
@@ -321,35 +327,35 @@ planner_server:
       
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
-      wheelbase: 0.3
-      turn_radius: 1.2
+      wheelbase: 0.189
+      minimum_turning_radius: 0.55
       is_reverse_cost: true
       is_holonomic_cost: false
       is_collision_checking_cost: true
 
     PreciseGridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
-      tolerance: 0.15
+      tolerance: 0.30
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 1.0
-      motion_model_for_search: "REEDS_SHEPP"
+      motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
       cost_travel_multiplier: 2.0
-      downsample_costmap: true
-      downsampling_factor: 2
+      # 精确路线不能把 0.06m 激光栅格再合并为 0.12m；否则车侧的近障碍
+      # 会被放大到车体内，Smac 会把本可通行的起点误判为 lethal。
+      downsample_costmap: false
       angle_quantization_bins: 48
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      minimum_turning_radius: 0.6
       reverse_penalty: 1.0
       non_straight_penalty: 30.0
       change_penalty: 20.0
       cost_penalty: 18.0
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
-      wheelbase: 0.3
-      turn_radius: 1.2
+      wheelbase: 0.189
+      minimum_turning_radius: 0.55
       is_reverse_cost: true
       is_holonomic_cost: false
       is_collision_checking_cost: true
@@ -416,10 +422,10 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     # 【全面放大平滑漏斗】匹配局部控制器的极限冲刺与倒车
-    max_velocity: [0.6, 0.0, 1.8]
-    min_velocity: [-0.30, 0.0, -1.3]
-    max_accel: [1.5, 0.0, 2.0]
-    max_decel: [-1.8, 0.0, -2.5]
+    max_velocity: [0.30, 0.0, 1.2]
+    min_velocity: [-0.20, 0.0, -1.0]
+    max_accel: [0.8, 0.0, 1.2]
+    max_decel: [-1.0, 0.0, -1.5]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

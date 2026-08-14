@@ -95,15 +95,25 @@ COMMANDS = {
         "ready_patterns": NAV_READY_PATTERNS,
         "ready_message": "Navigation2 已加载完成，可以开始导航",
     },
-    "nav_script": {
-        "name": "启动导航文件",
+    "depth_camera": {
+        "name": "启动深度相机",
         "group": "run",
-        "cmd": f"cd {q(f'{ROS_WS}/src/racecar/scripts/src')} && source {q(SETUP_FILE)} && python3 h1.py",
+        "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 launch deptrum-ros-driver-aurora930 aurora930_launch.py",
     },
     "qrcode": {
         "name": "启动二维码识别",
         "group": "run",
         "cmd": f"cd {q(f'{ROS_WS}/src/racecar/scripts/main')} && source {q(SETUP_FILE)} && python3 saoma.py",
+    },
+    "tts": {
+        "name": "启动语音播报",
+        "group": "run",
+        "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 launch voice_driver voice_tts.launch.py mode:=tts_only",
+    },
+    "nav_script": {
+        "name": "启动导航文件",
+        "group": "run",
+        "cmd": f"cd {q(f'{ROS_WS}/src/racecar/scripts/src')} && source {q(SETUP_FILE)} && python3 h1.py",
     },
     "gmapping": {
         "name": "启动建图",
@@ -126,11 +136,6 @@ COMMANDS = {
         "group": "tools",
         "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 run teleop_twist_keyboard teleop_twist_keyboard",
         "confirm": "键盘遥控需要交互式终端输入，网页后台启动可能无法接收按键。确认启动？",
-    },
-    "tts": {
-        "name": "启动语音播报",
-        "group": "tools",
-        "cmd": f"cd {q(ROS_WS)} && source {q(SETUP_FILE)} && ros2 launch voice_driver voice_tts.launch.py mode:=tts_only",
     },
     "volume_100": {
         "name": "测试语音模块",
@@ -163,7 +168,7 @@ COMMANDS = {
     },
 }
 
-START_ALL = ["base", "lidar", "nav_launch", "nav_script", "qrcode"]
+START_ALL = ["base", "lidar", "nav_launch", "depth_camera", "qrcode", "tts", "nav_script"]
 
 EDITABLE_FILES = {
     "nav_config": {
