@@ -8,6 +8,7 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    use_composition = LaunchConfiguration('use_composition', default='False')
 
         
     # nav_dir = get_package_share_directory('racecar')
@@ -38,6 +39,11 @@ def generate_launch_description():
             'params',
             default_value=param_file,
             description='Full path to param file to load'),
+
+        DeclareLaunchArgument(
+            'use_composition',
+            default_value='False',
+            description='Use a shared Nav2 component container'),
         
 
         Node(
@@ -59,7 +65,8 @@ def generate_launch_description():
             launch_arguments={
                 'map': map_file,
                 'use_sim_time': use_sim_time,
-                'params_file': param_file}.items(),
+                'params_file': param_file,
+                'use_composition': use_composition}.items(),
         ),
 
     ])
