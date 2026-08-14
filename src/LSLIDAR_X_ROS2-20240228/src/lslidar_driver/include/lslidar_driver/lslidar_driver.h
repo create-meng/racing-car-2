@@ -100,6 +100,15 @@ private:
     int points_size_;
     int idx = 0;
     int link_time = 0;
+    int scan_raw_points_ = 0;
+    int scan_below_min_ = 0;
+    int scan_above_max_ = 0;
+    int scan_kept_points_ = 0;
+    int scan_log_count_ = 0;
+    int n10_packet_count_ = 0;
+    int n10_zero_distance_packets_ = 0;
+    int n10_ffff_distance_packets_ = 0;
+    char n10_last_packet_hex_[175] = {};
 
     bool use_gps_ts;   
     bool is_start;

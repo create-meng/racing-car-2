@@ -16,7 +16,7 @@ class waypoint_cycle(Node):
         self.mark_pub = self.create_publisher(MarkerArray, '/path_point', 100)
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.create_subscription(PointStamped, '/clicked_point', self.click_callback, 10)
-        self.navigation_goal_status_sub_ = self.create_subscription(GoalStatusArray,"navigate_to_pose/_action/status",self.pose_callback,10)
+        self.navigation_goal_status_sub_ = self.create_subscription(GoalStatusArray,"navigate_through_poses/_action/status",self.pose_callback,10)
 
 
     def pose_callback(self, msg):

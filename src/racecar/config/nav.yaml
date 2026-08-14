@@ -45,8 +45,8 @@ amcl:
     z_short: 0.24
     scan_topic: /scan
     set_initial_pose: true
-    initial_pose.x: 0.5
-    initial_pose.y: 0.2
+    initial_pose.x: 0.0
+    initial_pose.y: 0.1
     initial_pose.z: 0.0
     initial_pose.yaw: 0.0
 
@@ -97,8 +97,8 @@ controller_server:
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.2
-      yaw_goal_tolerance: 0.9
+      xy_goal_tolerance: 0.40
+      yaw_goal_tolerance: 3.14
       stateful: true
 
     # --------------------------------------------------------------------------
@@ -156,7 +156,7 @@ controller_server:
         consider_footprint: true
         collision_cost: 10000.0          
         collision_margin_distance: 0.10
-        inflation_radius: 0.20
+        inflation_radius: 0.17
         cost_scaling_factor: 12.0
         near_goal_distance: 0.5
       PathAlignCritic:
@@ -191,13 +191,12 @@ local_costmap:
       width: 10
       height: 10
       resolution: 0.05                                  
-      robot_radius: 0.15
-      footprint: "[ [-0.15, -0.10], [-0.15, 0.10], [0.25, 0.10], [0.25, -0.10] ]"
+      footprint: "[ [-0.15, -0.12], [-0.15, 0.12], [0.15, 0.12], [0.15, -0.12] ]"
       plugins: ["obstacle_layer", "inflation_layer"]
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.20
+        inflation_radius: 0.17
         cost_scaling_factor: 12.0                        
 
       obstacle_layer:
@@ -235,13 +234,12 @@ global_costmap:
       use_sim_time: false
       rolling_window: false
       resolution: 0.06
-      robot_radius: 0.15
-      footprint: "[ [-0.15, -0.10], [-0.15, 0.10], [0.25, 0.10], [0.25, -0.10] ]"
+      footprint: "[ [-0.15, -0.12], [-0.15, 0.12], [0.15, 0.12], [0.15, -0.12] ]"
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"] 
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.20
+        inflation_radius: 0.17
         cost_scaling_factor: 12.0                        
 
       static_layer:

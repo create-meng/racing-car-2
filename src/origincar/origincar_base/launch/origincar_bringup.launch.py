@@ -51,7 +51,7 @@ def generate_launch_description():
             package='tf2_ros', 
             executable='static_transform_publisher', 
             name='link_to_laser',
-            arguments=['0', '0', '0.2','0', '0','0','base_link','laser'],
+            arguments=['0.05', '0', '0.2','0', '0','0','base_link','laser'],
     )
 
     imu_filter_node =  launch_ros.actions.Node(

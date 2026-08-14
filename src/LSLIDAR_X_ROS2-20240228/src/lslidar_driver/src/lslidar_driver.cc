@@ -235,7 +235,8 @@ namespace lslidar_driver
 		RCLCPP_INFO_STREAM(this->get_logger(), "Lidar is " << lidar_name.c_str());
 
 		if (pubScan)
-			scan_pub = this->create_publisher<sensor_msgs::msg::LaserScan>(scan_topic, 10);
+			scan_pub = this->create_publisher<sensor_msgs::msg::LaserScan>(
+				scan_topic, rclcpp::SensorDataQoS().keep_last(1));
 		if (pubPointCloud2)
 			point_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>(pointcloud_topic, 10);
 		difop_switch = this->create_subscription<std_msgs::msg::Int8>("lslidar_order", 1, std::bind(&LslidarDriver::lidar_order, this, std::placeholders::_1)); // 转速输入
@@ -686,6 +687,25 @@ namespace lslidar_driver
 		int point_len = 2;
 		if (lidar_name == "N10" || lidar_name == "L10")
 			point_len = 3;
+		if (lidar_name == "N10")
+		{
+			bool all_zero = true;
+			bool all_ffff = true;
+			n10_packet_count_++;
+			for (int num = 0; num < package_points; num++)
+			{
+				const int distance = packet_bytes[num * point_len + data_bits_start] * 256 +
+					packet_bytes[num * point_len + data_bits_start + 1];
+				all_zero &= distance == 0;
+				all_ffff &= distance == 0xFFFF;
+			}
+			if (all_zero)
+				n10_zero_distance_packets_++;
+			if (all_ffff)
+				n10_ffff_distance_packets_++;
+			for (int i = 0; i < PACKET_SIZE; i++)
+				snprintf(n10_last_packet_hex_ + i * 3, 4, "%02X ", packet_bytes[i]);
+		}
 
 		if (lidar_name == "M10_GPS" || lidar_name == "M10")
 		{
@@ -770,10 +790,40 @@ namespace lslidar_driver
 				last_degree = scan_points_[idx].degree;
 				count_num = idx;
 				idx = 0;
+				scan_raw_points_ = 0;
+				scan_below_min_ = 0;
+				scan_above_max_ = 0;
+				scan_kept_points_ = 0;
 				for (long unsigned int k = 0; k < scan_points_.size(); k++)
 				{
-					if (scan_points_[k].range < min_range || scan_points_[k].range > max_range)
+					if (scan_points_[k].range <= 0.0)
+						continue;
+					scan_raw_points_++;
+					if (scan_points_[k].range < min_range)
+					{
+						scan_below_min_++;
 						scan_points_[k].range = 0;
+					}
+					else if (scan_points_[k].range > max_range)
+					{
+						scan_above_max_++;
+						scan_points_[k].range = 0;
+					}
+					else
+						scan_kept_points_++;
+				}
+				if (++scan_log_count_ >= 50)
+				{
+					RCLCPP_INFO(this->get_logger(),
+						"[SCAN_DIAG] raw=%d kept=%d below_min=%d above_max=%d range=[%.2f, %.2f]",
+						scan_raw_points_, scan_kept_points_, scan_below_min_, scan_above_max_, min_range, max_range);
+					RCLCPP_INFO(this->get_logger(),
+						"[N10_PACKET_DIAG] packets=%d all_zero=%d all_ffff=%d last=%s",
+						n10_packet_count_, n10_zero_distance_packets_, n10_ffff_distance_packets_, n10_last_packet_hex_);
+					scan_log_count_ = 0;
+					n10_packet_count_ = 0;
+					n10_zero_distance_packets_ = 0;
+					n10_ffff_distance_packets_ = 0;
 				}
 				boost::unique_lock<boost::mutex> lock(mutex_);
 				scan_points_bak_.resize(scan_points_.size());

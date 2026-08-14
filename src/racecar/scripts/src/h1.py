@@ -38,6 +38,7 @@ class NavThroughPosesClient(Node):
         self.photo_triggered = False
         self.total_poses = 0
         self.trigger_point = 0
+        self._last_visited = None
         self.first_phase_done = False
         # 二维码接收
         self.qr_result = None
@@ -221,26 +222,13 @@ class NavThroughPosesClient(Node):
         self.get_logger().info(f"使用二维码结果：{self.qr_result}")
 
         if self.qr_result % 2 == 1:
-            self.get_logger().info("奇数：执行 shunshizhen1.csv，到达第 20 个点后触发拍照")
+            self.get_logger().info("奇数：执行完整 shunshizhen1.csv，到达第 15 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/shunshizhen1.csv")
             self.trigger_point = 15
         else:
             self.get_logger().info("偶数：执行 test_1.csv，到达第 34 个点后触发拍照")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
             self.trigger_point = 34
-
-        if self.amcl_pose and next_wp:
-            current_x, current_y, _ = self.amcl_pose
-            start_index = min(
-                range(len(next_wp)),
-                key=lambda i: math.hypot(next_wp[i][0] - current_x, next_wp[i][1] - current_y),
-            )
-            if start_index:
-                self.get_logger().info(
-                    f"扫码路线从最近路点 {start_index + 1}/{len(next_wp)} 接入，跳过已在车后的 {start_index} 个点"
-                )
-                next_wp = next_wp[start_index:]
-                self.trigger_point = max(1, self.trigger_point - start_index)
 
         next_poses = []
         for x, y, z, w in next_wp:
@@ -256,6 +244,7 @@ class NavThroughPosesClient(Node):
 
         self.total_poses = len(next_poses)
         self.photo_triggered = False
+        self._last_visited = None
         self.send_goal(next_poses)
 
     def feedback_callback(self, feedback_msg):
@@ -263,14 +252,12 @@ class NavThroughPosesClient(Node):
         remaining = feedback.distance_remaining
         if self.total_poses > 0:
             visited = self.total_poses - feedback.number_of_poses_remaining
-            self.get_logger().info(
-                "剩余距离：{0:.2f} m | 已过 {1}/{2} 个点".format(remaining, visited, self.total_poses),
-                once=True,
-            )
-            # 每到达一个新路点时记录 AMCL 位姿
-            if hasattr(self, '_last_visited') and visited != self._last_visited:
+            if visited != self._last_visited:
+                self.get_logger().info(
+                    "剩余距离：{0:.2f} m | 已过 {1}/{2} 个点".format(remaining, visited, self.total_poses)
+                )
                 self.log_amcl(f"到达路点 {visited}")
-            self._last_visited = visited
+                self._last_visited = visited
         else:
             self.get_logger().info(
                 "剩余距离：{0:.2f} m | 剩余路点 {1} 个".format(remaining, feedback.number_of_poses_remaining),
