@@ -122,7 +122,7 @@ controller_server:
       vx_std: 0.35                       
       vy_std: 0.0                        
       wz_std: 0.8                        
-      vx_max: 0.25                       # 降速，给阿克曼底盘更多贴点修正时间
+      vx_max: 0.35                       # 空旷段最高前向速度
       vx_min: -0.20                      # 保留倒车能力，同时限制正常倒车速度
       vy_max: 0.0
       wz_max: 1.0                        # 降低角速度，减少高速甩出路点
@@ -422,7 +422,7 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     # 【全面放大平滑漏斗】匹配局部控制器的极限冲刺与倒车
-    max_velocity: [0.30, 0.0, 1.2]
+    max_velocity: [0.35, 0.0, 1.2]
     min_velocity: [-0.20, 0.0, -1.0]
     max_accel: [0.8, 0.0, 1.2]
     max_decel: [-1.0, 0.0, -1.5]

@@ -381,19 +381,8 @@ class NavThroughPosesClient(Node):
     def route_poses(self):
         return self._qr_route_poses if self.first_phase_done else self._dating_route_poses
 
-    def passed_route_prefix(self, route, start_index, x, y):
-        """只删除进入通过半径的连续路点，不能因绕远而跳过目标。"""
-        index = max(0, start_index)
-        while index < len(route) - 1:
-            point = route[index].pose.position
-            distance = math.hypot(x - point.x, y - point.y)
-            if distance > self.POINT_REACHED_RADIUS:
-                break
-            index += 1
-        return index
-
     def monitor_route(self):
-        """全程打印 AMCL 与当前目标；二维码路线额外处理无进展重发。"""
+        """全程打印 AMCL 与当前目标；二维码路线仅在异常时重规划。"""
         if not self._active_route_poses:
             return
         if self._goal_handle is None or self._goal_pending:
@@ -421,26 +410,6 @@ class NavThroughPosesClient(Node):
         )
         if not self.first_phase_done:
             return
-
-        # 大删除：仅删除连续进入通过半径的点，绕远时仍追原目标。
-        route = self.route_poses()
-        passed_to = self.passed_route_prefix(
-            route, self._active_route_offset, amcl_x, amcl_y
-        )
-        if passed_to > self._active_route_offset and passed_to < len(route):
-            if not self._qr_replan_requested:
-                old_offset = self._active_route_offset
-                self._qr_route_offset = passed_to
-                self._qr_replan_requested = True
-                self._qr_escape_replan_pending = False
-                self.get_logger().warn(
-                    f"[追点] 已越过路点[{old_offset + 1}~{passed_to}]，批量删除；"
-                    f"下一目标[{passed_to + 1}]，AMCL=({amcl_x:.3f},{amcl_y:.3f})"
-                )
-                self._goal_handle.cancel_goal_async().add_done_callback(
-                    self.cancel_response_callback
-                )
-                return
 
         now = self.get_clock().now().nanoseconds / 1e9
         if self._qr_target_index != target_index:
