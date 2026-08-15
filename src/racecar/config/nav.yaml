@@ -39,8 +39,8 @@ amcl:
     tf_broadcast: true
     # 不给 map->odom 未来发布 2 秒，避免过滤器和 costmap 请求到未来 TF。
     transform_tolerance: 0.3
-    update_min_a: 0.2
-    update_min_d: 0.2
+    update_min_a: 0.1
+    update_min_d: 0.1
     z_hit: 0.7
     z_rand: 0.059
     z_short: 0.24
@@ -121,9 +121,12 @@ controller_server:
       time_steps: 25                     # 预测前瞻步数降为 20 步
       
       batch_size: 800                    # 每次撒出的预测轨迹数
-      vx_std: 0.35                       
+      # vx_std 收窄：速度采样集中到低速区，近障碍时最优轨迹自然减速
+      # （近似“近障碍自动限速”），空旷段仍由 PathFollowCritic 拉到 vx_max。
+      vx_std: 0.20                       
       vy_std: 0.0                        
-      wz_std: 0.8                        
+      # wz_std 收窄：转向采样更平滑，减少高速大转向扫到贴路线锥桶。
+      wz_std: 0.6                        
       vx_max: 0.55                       # 空旷段最高前向速度
       vx_min: -0.20                      # 保留倒车能力，同时限制正常倒车速度
       vy_max: 0.0
@@ -162,11 +165,14 @@ controller_server:
         cost_weight: 5.0                 # 空旷段优先正向行驶，保留脱困倒车能力
         threshold_to_consider: 0.5
       ObstaclesCritic:
-        repulsion_weight: 20.0
-        critical_weight: 70.0
+        # 0.1~0.2m 距离内排斥更强：转弯绕锥桶时更早远离，减少高速贴障。
+        repulsion_weight: 25.0
+        critical_weight: 80.0
         consider_footprint: true
         collision_cost: 10000.0          
-        collision_margin_distance: 0.15
+        # 0.12m 仍允许 0.3m 级缝隙挤过，但开阔段不再贴着锥桶 5cm 走，
+        # 避免上一轮“敢挤变贴着开”导致的大量碰障。
+        collision_margin_distance: 0.12
         inflation_radius: 0.20
         cost_scaling_factor: 10.0
         near_goal_distance: 0.5
@@ -246,7 +252,7 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 5.0
+      update_frequency: 8.0
       publish_frequency: 5.0
       global_frame: map
       robot_base_frame: base_footprint
@@ -283,7 +289,9 @@ global_costmap:
           expected_update_rate: 0.2
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 4.5
+          # 只把车附近 2.5m 内的实时障碍写进 map 系；远处的动态障碍
+          # 经 AMCL map->odom 变换误差大且信息过时，只会污染全局规划。
+          obstacle_max_range: 2.5
           obstacle_min_range: 0.01
 
       always_send_full_costmap: true
@@ -322,28 +330,37 @@ planner_server:
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
-      max_planning_time: 1.0                            
+      # 3s：起步贴墙/卡点时搜索空间大，1s 内扩展不完会误报 no valid path；
+      # 正常情况规划 <0.1s 完成，此上限只影响卡点。
+      max_planning_time: 3.0                            
       motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
       cost_travel_multiplier: 2.0
       
-      downsample_costmap: true                          
+      downsample_costmap: false                          
       downsampling_factor: 2                            
       angle_quantization_bins: 48                       
 
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      reverse_penalty: 2.0                               # 正常路线减少倒车，必要时仍可倒车脱困
+      # 1.2：正常仍以正车为主，但被障碍卡住时 Smac 愿意规划
+      # “倒车→转向→前进”的完整脱困 maneuver（人开也是一把倒车拧过去）。
+      reverse_penalty: 1.2
       non_straight_penalty: 30.0
       change_penalty: 20.0                              
-      cost_penalty: 18.0                                 
+      # 253 仍可穿（防卡死），但 cost_penalty 提高让路径优先绕开高代价区，
+      # 避免“允许穿过”退化成“默认贴着障碍走”。
+      cost_penalty: 28.0                                 
       
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
       wheelbase: 0.189
-      minimum_turning_radius: 0.55
+      minimum_turning_radius: 0.40
+      # 只把 254 真实障碍当不可通行；锥桶在 253 膨胀区内时仍能规划，
+      # 避免“起点/通道被 253 判 lethal”导致 no valid path（issue #2457）。
+      # 执行层 MPPI 仍按局部代价避障，安全性由 254 兜底。
       is_reverse_cost: true
       is_holonomic_cost: false
-      is_collision_checking_cost: true
+      is_collision_checking_cost: false
 
     PreciseGridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
@@ -351,7 +368,7 @@ planner_server:
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
-      max_planning_time: 1.0
+      max_planning_time: 3.0
       motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
       cost_travel_multiplier: 2.0
       # 精确路线不能把 0.06m 激光栅格再合并为 0.12m；否则车侧的近障碍
@@ -360,17 +377,18 @@ planner_server:
       angle_quantization_bins: 48
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      reverse_penalty: 2.0
+      reverse_penalty: 1.2
       non_straight_penalty: 30.0
       change_penalty: 20.0
-      cost_penalty: 18.0
+      # 同 GridBased：允许 253 可穿，但路径优先绕开高代价区。
+      cost_penalty: 28.0
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
       wheelbase: 0.189
-      minimum_turning_radius: 0.55
+      minimum_turning_radius: 0.40
       is_reverse_cost: true
       is_holonomic_cost: false
-      is_collision_checking_cost: true
+      is_collision_checking_cost: false
 
 planner_server_rclcpp_node:
   ros__parameters:

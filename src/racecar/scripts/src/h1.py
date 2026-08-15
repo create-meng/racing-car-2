@@ -7,9 +7,11 @@ from std_msgs.msg import String  # 必须是String！
 from nav2_msgs.action import NavigateThroughPoses
 from nav2_msgs.msg import Costmap
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
 from action_msgs.msg import GoalStatus
+from nav2_msgs.srv import ClearEntireCostmap
 from tf2_ros import Buffer, TransformListener, TransformException
 from rclpy.time import Time
 import csv
@@ -19,8 +21,8 @@ import math
 
 
 class NavThroughPosesClient(Node):
-    FINAL_RETURN_X = 0.0
-    FINAL_RETURN_Y = 0.1
+    FINAL_RETURN_X = 0.5
+    FINAL_RETURN_Y = 0.2
     # 二维码路线当前目标的直接完成/删除半径；命中一次立即提交，不做连续帧确认。
     POINT_REACHED_RADIUS = 0.30
     # 253 只是膨胀层的 inscribed proximity，不能据此取消可通行路径；
@@ -28,11 +30,11 @@ class NavThroughPosesClient(Node):
     ESCAPE_TRIGGER_COST = 254
     ESCAPE_BLOCK_COST = 254
     ESCAPE_CONFIRMATIONS = 3
-    ESCAPE_SPEED = -0.05
+    ESCAPE_SPEED = -0.15
     ESCAPE_DISTANCE = 0.15
-    ESCAPE_REAR_CLEARANCE = 0.30
-    ESCAPE_FRONT_CLEARANCE = 0.20
-    FIRST_PHASE_RETRY_DELAY = 1.0
+    ESCAPE_REAR_CLEARANCE = 0.25
+    ESCAPE_FRONT_CLEARANCE = 0.15
+    FIRST_PHASE_RETRY_DELAY = 0.2
     DATING_WINDOW_SIZE = 1
     # NavigateThroughPoses 只保证最后一个目标成功，不保证中间目标到达；
     # 二维码路线必须逐点提交，否则会把未到达的点一起删掉。
@@ -54,12 +56,13 @@ class NavThroughPosesClient(Node):
         self._qr_last_progress_time = None
         self._qr_last_amcl = None
         self._qr_last_remaining = None
-        self._qr_stall_timeout = 12.0
-        self._qr_escape_distance = 0.22
-        self._qr_escape_timeout = 5.0
+        self._qr_stall_timeout = 8.0
+        self._qr_escape_distance = 0.50
+        self._qr_escape_timeout = 6.0
         self._qr_escape_timer = None
         self._qr_escape_started_at = None
         self._qr_escape_start_amcl = None
+        self._qr_escape_start_odom = None
         self._qr_escape_turn = 0.0
         self._escape_speed = 0.0
         self._escape_preferred_turn = 0.0
@@ -79,6 +82,7 @@ class NavThroughPosesClient(Node):
         self._dating_route_poses = []
         self._dating_route_offset = 0
         self._first_phase_retry_timer = None
+        self._first_phase_failures = 0
         self._goal_retry_timer = None
         self._pending_goal_poses = None
 
@@ -94,6 +98,15 @@ class NavThroughPosesClient(Node):
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             ),
         )
+        # odom 用于脱困位移判定：AMCL 在 update_min_d=0.1~0.2 下低速移动
+        # 时不发布新位姿，用 AMCL 判位移会把“实际在挪”误判为 0。
+        self.odom_pose = None
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            "/odom_combined",
+            self.odom_callback,
+            10,
+        )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.local_costmap_sub = self.create_subscription(
@@ -106,6 +119,18 @@ class NavThroughPosesClient(Node):
         self.marker_pub = self.create_publisher(Marker, "/forbidden_zone_marker", 10)
         self.timer = self.create_timer(1.0, self.show_forbidden_zone)
         self.route_monitor_timer = self.create_timer(1.0, self.monitor_route)
+
+        # 脱困结束后清理全局/局部代价地图：激光经 AMCL map->odom 变换后，
+        # 全局图会残留“压在车体上的 254/253”脏障碍（13:23:43 全局254/局部0），
+        # 不清图的话脱困后重规划会再次失败并继续撞障碍。
+        # 注意：Nav2 清图服务类型是 nav2_msgs/srv/ClearEntireCostmap，
+        # 用 std_srvs/Empty 会导致 service_is_ready 永远为 False（静默失败）。
+        self._clear_global_client = self.create_client(
+            ClearEntireCostmap, "/global_costmap/clear_entirely_global_costmap"
+        )
+        self._clear_local_client = self.create_client(
+            ClearEntireCostmap, "/local_costmap/clear_entirely_local_costmap"
+        )
 
         # 用于发布到达特定点时的文本
         self.text_pub = self.create_publisher(String, "/special_goal_topic", 10)
@@ -138,6 +163,11 @@ class NavThroughPosesClient(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.amcl_pose = (p.position.x, p.position.y, yaw)
+
+    def odom_callback(self, msg):
+        """记录里程计位置 (odom_combined 系)，用于脱困位移判定。"""
+        p = msg.pose.pose
+        self.odom_pose = (p.position.x, p.position.y)
 
     def scan_callback(self, msg):
         self._latest_scan = msg
@@ -303,10 +333,45 @@ class NavThroughPosesClient(Node):
         """二维码路线的所有脱困触发统一取消任务，再进入同一脱困状态。"""
         if not self.first_phase_done or self.qr_result is None or self._qr_replan_requested:
             return
+
+        # 连续多次脱困仍无法推进时，若目标方向持续被障碍占据则跳过该点继续路线，
+        # 保证“整条路线完成优先级最高，不能永久卡在某一点”。
+        route_poses = self.route_poses()
+        if self._active_route_poses and route_poses:
+            idx = self._qr_route_offset
+            attempts = self._qr_escape_attempts.get(idx, 0)
+            if attempts >= 4 and idx < len(route_poses):
+                target = self._active_route_poses[0].pose.position
+                if self.amcl_pose is not None:
+                    distance = math.hypot(
+                        target.x - self.amcl_pose[0], target.y - self.amcl_pose[1]
+                    )
+                    front = self.scan_clearance(True)
+                    if distance < 0.8 and front is not None and front < 0.6:
+                        self.get_logger().error(
+                            f"[跳过障碍点] 目标[{idx + 1}] 已脱困 {attempts} 次仍被障碍占据"
+                            f"（距离={distance:.2f}m，前方={front:.2f}m），跳过该点继续路线"
+                        )
+                        self._qr_escape_attempts.pop(idx, None)
+                        self._qr_route_offset = min(len(self._qr_route_poses), idx + 1)
+                        self._qr_replan_requested = True
+                        self._qr_escape_replan_pending = False
+                        if self._goal_handle is not None and not self._goal_pending:
+                            self._goal_handle.cancel_goal_async().add_done_callback(
+                                self.cancel_response_callback
+                            )
+                        else:
+                            self.resend_qr_route()
+                        return
+
         self._qr_no_progress_successes = 0
         self._qr_replan_requested = True
         self._qr_escape_replan_pending = True
         self._escape_prefer_reverse = prefer_reverse
+        # 统一在此累计当前目标的脱困次数（ABORTED/无位移/假成功都走这里）
+        self._qr_escape_attempts[self._qr_route_offset] = (
+            self._qr_escape_attempts.get(self._qr_route_offset, 0) + 1
+        )
         self.get_logger().warn(f"[脱困] {reason}，取消当前导航并选择安全动作")
         if self._goal_handle is not None and not self._goal_pending:
             self._goal_handle.cancel_goal_async().add_done_callback(self.cancel_response_callback)
@@ -650,11 +715,12 @@ class NavThroughPosesClient(Node):
         angle_error = math.atan2(
             math.sin(target_heading - yaw), math.cos(target_heading - yaw)
         )
-        self._qr_escape_turn = max(-0.8, min(0.8, 1.2 * angle_error))
-        if abs(self._qr_escape_turn) < 0.25:
-            self._qr_escape_turn = 0.25 if angle_error >= 0.0 else -0.25
+        self._qr_escape_turn = max(-1.0, min(1.0, 1.2 * angle_error))
+        if abs(self._qr_escape_turn) < 0.5:
+            self._qr_escape_turn = 0.5 if angle_error >= 0.0 else -0.5
         self._escape_preferred_turn = self._qr_escape_turn
         self._qr_escape_start_amcl = (x, y)
+        self._qr_escape_start_odom = self.odom_pose
         selected_speed, selected_turn, reason = self.choose_escape_motion(
             self._escape_preferred_turn
         )
@@ -673,12 +739,12 @@ class NavThroughPosesClient(Node):
                 rear_clearance = self.scan_clearance(False)
                 if rear_clearance is not None:
                     self._qr_escape_distance = min(
-                        0.35, max(0.22, rear_clearance - 0.10)
+                        0.65, max(0.40, rear_clearance - 0.15)
                     )
                 else:
-                    self._qr_escape_distance = 0.22
+                    self._qr_escape_distance = 0.50
             else:
-                self._qr_escape_distance = 0.22
+                self._qr_escape_distance = 0.50
         motion = (
             "前进转向" if self._escape_speed > 0.0
             else "倒车转向" if self._escape_speed < 0.0
@@ -716,10 +782,21 @@ class NavThroughPosesClient(Node):
             self._qr_escape_started_at = now
             if not self.prepare_qr_escape():
                 return
-        x, y, _ = self.amcl_pose
-        moved = math.hypot(
-            x - self._qr_escape_start_amcl[0], y - self._qr_escape_start_amcl[1]
-        )
+        # 脱困位移优先用 odom 判定：AMCL 在 update_min_d 阈值内不发布，
+        # 低速脱困时会把“实际在挪”误判为 0.00m；odom 始终连续。
+        moved = None
+        if self._qr_escape_start_odom is not None and self.odom_pose is not None:
+            moved = math.hypot(
+                self.odom_pose[0] - self._qr_escape_start_odom[0],
+                self.odom_pose[1] - self._qr_escape_start_odom[1],
+            )
+        if moved is None and self._qr_escape_start_amcl is not None:
+            x, y, _ = self.amcl_pose
+            moved = math.hypot(
+                x - self._qr_escape_start_amcl[0], y - self._qr_escape_start_amcl[1]
+            )
+        if moved is None:
+            moved = 0.0
         selected_speed, selected_turn, reason = self.choose_escape_motion(
             self._escape_preferred_turn
         )
@@ -751,6 +828,25 @@ class NavThroughPosesClient(Node):
         self.get_logger().warn(f"[脱困] 动作结束：实际位移={moved:.2f}m，重新规划")
         self.resend_qr_route()
 
+    def clear_costmaps(self):
+        """清空全局/局部代价地图的障碍层（异步，不阻塞）。
+
+        脱困结束后调用：激光经 AMCL map->odom 变换会在全局图留下
+        “压在车体上的 254/253”脏障碍，不清掉则重规划仍会失败。
+        """
+        for client in (self._clear_global_client, self._clear_local_client):
+            if client.service_is_ready():
+                future = client.call_async(ClearEntireCostmap.Request())
+                future.add_done_callback(
+                    lambda f, name=client.srv_name: (
+                        self.get_logger().info(f"[清图] 成功 {name}")
+                        if f.result() is not None
+                        else self.get_logger().warn(f"[清图] 失败 {name}")
+                    )
+                )
+            else:
+                self.get_logger().warn(f"[清图] 服务未就绪 {client.srv_name}")
+
     def stop_qr_escape(self):
         cmd = Twist()
         self.escape_cmd_pub.publish(cmd)
@@ -759,12 +855,15 @@ class NavThroughPosesClient(Node):
             self._qr_escape_timer = None
         self._qr_escape_started_at = None
         self._qr_escape_start_amcl = None
+        self._qr_escape_start_odom = None
         self._escape_speed = 0.0
         self._qr_escape_turn = 0.0
         self._escape_preferred_turn = 0.0
         self._escape_prefer_reverse = False
-        self._qr_escape_distance = 0.22
+        self._qr_escape_distance = 0.50
         self._escape_wait_logged_at = None
+        # 脱困动作结束：清掉全局/局部障碍残影，让重规划基于干净地图。
+        self.clear_costmaps()
 
     def resend_qr_route(self):
         # 进度只由结果/脱困处理器提交一次；重发函数不能再次提交旧窗口。
@@ -820,6 +919,7 @@ class NavThroughPosesClient(Node):
         if not remaining:
             self.get_logger().error("[首阶段] 重发时没有剩余 dating 路点")
             return
+        self._first_phase_failures = 0
         window = remaining[:self.DATING_WINDOW_SIZE]
         self._last_visited = None
         self._active_route_poses = window
@@ -916,8 +1016,15 @@ class NavThroughPosesClient(Node):
                     if self._local_costmap is not None else None
                 )
                 if local_cost is None or local_cost < self.ESCAPE_BLOCK_COST:
+                    # 起步贴墙时 planner 间歇性失败（no valid path found）。
+                    # 连续失败后先清图（清掉间歇 254/残影）再快速重试，
+                    # 0.2s 仅作节流，避免失败-重发紧密循环刷爆 Nav2 日志。
+                    self._first_phase_failures += 1
+                    if self._first_phase_failures >= 2:
+                        self.clear_costmaps()
                     self.get_logger().warn(
                         f"dating.csv 规划 ABORTED，但局部车体代价={local_cost}，"
+                        f"失败次数={self._first_phase_failures}，"
                         f"{self.FIRST_PHASE_RETRY_DELAY:.1f}s 后重试"
                     )
                     self._first_phase_retry_timer = self.create_timer(
@@ -956,7 +1063,6 @@ class NavThroughPosesClient(Node):
                 if current_index < len(route_poses) - 1 and attempts > 0 \
                         and self._target_is_passed(current_index):
                     self._qr_route_offset = current_index + 1
-                self._qr_escape_attempts[current_index] = attempts + 1
                 if current_index == len(route_poses) - 1:
                     reason = f"Nav2 返回 ABORTED，最终目标[{current_index + 1}]，脱困后重试"
                 else:
