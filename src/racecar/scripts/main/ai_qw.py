@@ -97,7 +97,12 @@ class AIVisionPublisher(Node):
                         {"type": "text", "text": "请分析这个画面，只分析漫画人物，在30字以内描述，包括人物的性别，年龄，以及所在场景。"}
                     ]
                 }],
-                max_tokens=50
+                max_tokens=50,
+                # 关闭思考模式：qwen3.7-plus 默认思考（先生成大量推理内容再回答），
+                # 图生文只需直出 30 字描述，关闭后推理速度快很多。
+                # 注意：enable_thinking 不是 OpenAI 标准参数，必须走 extra_body 才生效
+                # （直接放顶层会被忽略，参考 DashScope 深度思考文档）。
+                extra_body={"enable_thinking": False},
             )
             return response.choices[0].message.content
         except Exception as e:
