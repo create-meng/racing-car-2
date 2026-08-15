@@ -4,6 +4,7 @@
 build/
 install/
 log/
+logs/
 
 # ========================
 # Python 缓存 & 编译文件
