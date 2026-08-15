@@ -33,7 +33,7 @@ class AIVisionPublisher(Node):
     def configure_cloud_services(self):
         try:
             self.llm_client = OpenAI(
-                api_key="sk-ws-H.RPMHDDI.4vTi.MEQCIEEeDfg1s9MR7Q7_UNmOHCQXMODOw00ApoK_8z7-1W_NAiBO2vnra0ag43bUmzG5ChVfruMOTca994eRhIXQm4HQOg", 
+                api_key="sk-ws-H.EPMMRPX.ha41.MEUCIBtDZ00VSRzdWvNtcG0quENn5ZCMCVHFz9GBRq8a_hrDAiEAwVnXtlIFG3kFjVd1tpARpORxGHX59J_j01WBSHTxvBc", 
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
             self.get_logger().info("大模型客户端初始化成功。")
@@ -89,7 +89,7 @@ class AIVisionPublisher(Node):
     def get_image_description_base64(self, base64_str):
         try:
             response = self.llm_client.chat.completions.create(
-                model="qwen3-vl-flash",
+                model="qwen3.7-plus",
                 messages=[{
                     "role": "user", 
                     "content": [

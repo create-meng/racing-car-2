@@ -34,9 +34,8 @@ class NavThroughPosesClient(Node):
         self.text_pub = self.create_publisher(String, "/special_goal_topic", 10)
 
         # 拍照触发标志与路点统计
-        self.photo_triggered = False
+        self.photo_triggered = False  # 图生文已触发标志（仅触发一次）
         self.total_poses = 0
-        self.trigger_point = 0
         self.first_phase_done = False  # 标记第一阶段(dating.csv)是否完成
 
         # 第二阶段(循环)状态：步骤A 先到第一个路点回正航向，步骤B 再正着跑完整圈
@@ -65,7 +64,7 @@ class NavThroughPosesClient(Node):
         self.get_logger().info("二维码监听已启动：识别到数字后将立即切换路径")
 
     def amcl_callback(self, msg):
-        """记录 AMCL 定位位姿 (map 系)。"""
+        """记录 AMCL 定位位姿 (map 系)，并检查是否满足图生文触发条件。"""
         p = msg.pose.pose
         q = p.orientation
         yaw = math.atan2(
@@ -73,6 +72,39 @@ class NavThroughPosesClient(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         self.amcl_pose = (p.position.x, p.position.y, yaw)
+        self.check_amcl_photo_trigger()
+
+    def check_amcl_photo_trigger(self):
+        """图生文触发：AMCL 位姿进入允许区域时触发一次（仅触发一次）。
+
+        允许触发区域（由二维码方向决定）：
+        - 顺时针循环（奇数）：x∈[3.7,4.3]，y∈[3.7,4.3]
+        - 逆时针循环（偶数）：x∈[0.7,1.3]，y∈[3.7,4.3]
+        """
+        if self.photo_triggered:      # 已触发过 → 不再触发
+            return
+        if self.phase2_step != 1:     # 仅在整圈循环（步骤B）阶段触发
+            return
+        if self.amcl_pose is None or self.qr_result is None:
+            return
+
+        x, y, _ = self.amcl_pose
+        if self.qr_result % 2 == 1:
+            # 顺时针循环
+            allowed = (3.7 <= x <= 4.3) and (3.7 <= y <= 4.3)
+            region = "顺时针(3.7-4.3, 3.7-4.3)"
+        else:
+            # 逆时针循环
+            allowed = (0.7 <= x <= 1.3) and (3.7 <= y <= 4.3)
+            region = "逆时针(0.7-1.3, 3.7-4.3)"
+
+        if allowed:
+            msg = String()
+            msg.data = "gaol"
+            self.text_pub.publish(msg)
+            self.photo_triggered = True
+            self.get_logger().info(
+                f"【图生文触发】AMCL 位姿({x:.3f}, {y:.3f}) 进入 {region}，已触发（仅一次）")
 
     def log_amcl(self, tag):
         """把当前 AMCL 位姿写入日志。"""
@@ -249,7 +281,7 @@ class NavThroughPosesClient(Node):
                 self.get_logger().warn(
                     f"卡墙，跳过第 {start-1} 个路点，从第 {start} 个继续走（共 {self.loop_total} 点）")
                 self.total_poses = self.loop_total
-                self.photo_triggered = False
+                # 注意：卡墙重试不重置 photo_triggered → 图生文整个任务仅触发一次
                 # 短暂等待后重新规划
                 for _ in range(5):
                     rclpy.spin_once(self, timeout_sec=0.1)
@@ -277,11 +309,8 @@ class NavThroughPosesClient(Node):
             self.get_logger().info("偶数：执行 test_1.csv（逆时针循环）")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
 
-        # 拍照触发点：倒数第 2 个路点（保持原 shunshizhen1=15 语义，对两个循环都自适应）
-        self.trigger_point = len(next_wp) - 1
-        self.get_logger().info(f"循环共 {len(next_wp)} 个路点，到达第 {self.trigger_point} 个点后触发拍照")
-
-        # 构建循环全量路点
+        # 图生文触发：由 AMCL 位姿区域触发（见 check_amcl_photo_trigger），
+        # 不再按路点计数触发。这里只构建循环全量路点。
         self.loop_poses = self.build_poses(next_wp)
         self.loop_total = len(self.loop_poses)
 
@@ -316,13 +345,7 @@ class NavThroughPosesClient(Node):
                 once=True,
             )
 
-        if not self.photo_triggered and self.total_poses > 0:
-            if visited >= self.trigger_point:
-                msg = String()
-                msg.data = "gaol"
-                self.text_pub.publish(msg)
-                self.photo_triggered = True
-                self.get_logger().info(f"已到达第 {self.trigger_point} 个点，触发拍照")
+        # 图生文触发已改为 AMCL 位姿区域触发（check_amcl_photo_trigger），此处不再触发
 
     def watchdog_tick(self):
         """1Hz 看门狗：目标在执行但 5s 无进展 → 主动取消，跳过该路点继续走。"""
