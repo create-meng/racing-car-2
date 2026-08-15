@@ -10,8 +10,10 @@
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
-              <!-- 统一 0.30m 完成半径，避免行为树和上层客户端删点标准不一致。 -->
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.30"/>
+              <!--
+                路线客户端按短窗口和路线投影自行确认节点完成。
+                不再让 BT 隐式删除经过点，否则会与 h1 的比赛规则索引不同步。
+              -->
               <Fallback name="ComputeOrKeepCurrentPath">
                 <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="PreciseGridBased"/>
                 <IsPathValid path="{path}"/>

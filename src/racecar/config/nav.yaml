@@ -63,7 +63,8 @@ bt_navigator:
   ros__parameters:
     use_sim_time: false
     transform_tolerance: 0.1
-    goal_reached_tol: 0.4
+    # h1 负责比赛路线节点确认；BT 只保留较小的底层完成容差。
+    goal_reached_tol: 0.25
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: odom_combined
@@ -106,7 +107,7 @@ controller_server:
 
     precise_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.30
+      xy_goal_tolerance: 0.22
       yaw_goal_tolerance: 3.14
       stateful: true
 
@@ -161,11 +162,11 @@ controller_server:
         cost_weight: 5.0                 # 空旷段优先正向行驶，保留脱困倒车能力
         threshold_to_consider: 0.5
       ObstaclesCritic:
-        repulsion_weight: 14.0
-        critical_weight: 45.0
+        repulsion_weight: 20.0
+        critical_weight: 70.0
         consider_footprint: true
         collision_cost: 10000.0          
-        collision_margin_distance: 0.08
+        collision_margin_distance: 0.15
         inflation_radius: 0.20
         cost_scaling_factor: 10.0
         near_goal_distance: 0.5

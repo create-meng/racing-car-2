@@ -21,9 +21,11 @@ import math
 class NavThroughPosesClient(Node):
     FINAL_RETURN_X = 0.0
     FINAL_RETURN_Y = 0.1
+    # 二维码路线当前目标的直接完成/删除半径；命中一次立即提交，不做连续帧确认。
     POINT_REACHED_RADIUS = 0.30
-    # 253 表示车体已进入 inscribed 区，必须提前脱困；254 仍是硬碰撞边界。
-    ESCAPE_TRIGGER_COST = 253
+    # 253 只是膨胀层的 inscribed proximity，不能据此取消可通行路径；
+    # 只有 254 才表示 footprint 实际进入 lethal 障碍区。
+    ESCAPE_TRIGGER_COST = 254
     ESCAPE_BLOCK_COST = 254
     ESCAPE_CONFIRMATIONS = 3
     ESCAPE_SPEED = -0.05
@@ -31,7 +33,11 @@ class NavThroughPosesClient(Node):
     ESCAPE_REAR_CLEARANCE = 0.30
     ESCAPE_FRONT_CLEARANCE = 0.20
     FIRST_PHASE_RETRY_DELAY = 1.0
-    QR_POINT_TIMEOUT = 20.0
+    DATING_WINDOW_SIZE = 1
+    # NavigateThroughPoses 只保证最后一个目标成功，不保证中间目标到达；
+    # 二维码路线必须逐点提交，否则会把未到达的点一起删掉。
+    QR_WINDOW_SIZE = 1
+    QR_PASS_CORRIDOR = 0.45
 
     def __init__(self):
         super().__init__('nav_through_poses_client')
@@ -41,12 +47,11 @@ class NavThroughPosesClient(Node):
         self._first_phase_cancel_requested = False
         self._qr_route_poses = []
         self._qr_route_offset = 0
+        self._qr_window_size = self.QR_WINDOW_SIZE
         self._qr_replan_requested = False
         self._qr_last_progress_time = None
         self._qr_last_amcl = None
         self._qr_last_remaining = None
-        self._qr_target_index = None
-        self._qr_target_started_at = None
         self._qr_stall_timeout = 12.0
         self._qr_escape_distance = 0.22
         self._qr_escape_timeout = 5.0
@@ -56,7 +61,9 @@ class NavThroughPosesClient(Node):
         self._qr_escape_turn = 0.0
         self._escape_speed = 0.0
         self._escape_preferred_turn = 0.0
+        self._escape_prefer_reverse = False
         self._qr_escape_replan_pending = False
+        self._qr_point_completion_pending = False
         self._qr_escape_attempts = {}
         self._costmap_escape_hits = 0
         self._escape_requires_clear = False
@@ -66,6 +73,7 @@ class NavThroughPosesClient(Node):
         self._active_route_poses = []
         self._active_route_offset = 0
         self._dating_route_poses = []
+        self._dating_route_offset = 0
         self._first_phase_retry_timer = None
         self._goal_retry_timer = None
         self._pending_goal_poses = None
@@ -198,13 +206,14 @@ class NavThroughPosesClient(Node):
             return
 
         self._escape_requires_clear = True
-        level = "inscribed" if cost < self.ESCAPE_BLOCK_COST else "lethal"
+        level = "lethal"
         front_clearance = self.scan_clearance(True)
         rear_clearance = self.scan_clearance(False)
         self.request_qr_escape(
             f"footprint 连续 {self._costmap_escape_hits} 帧进入 {level} 代价 {cost}，"
             f"前={front_clearance if front_clearance is not None else '--'}m，"
-            f"后={rear_clearance if rear_clearance is not None else '--'}m"
+            f"后={rear_clearance if rear_clearance is not None else '--'}m",
+            prefer_reverse=True,
         )
 
     def scan_clearance(self, forward):
@@ -242,7 +251,7 @@ class NavThroughPosesClient(Node):
             return False, "无 base_footprint TF"
         x, y, yaw = pose
         current_costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
-        current_inscribed = sum(cost >= self.ESCAPE_TRIGGER_COST for cost in current_costs)
+        current_blocked = sum(cost >= self.ESCAPE_TRIGGER_COST for cost in current_costs)
         step_distance = 0.025
         for _ in range(int(self.ESCAPE_DISTANCE / step_distance)):
             dt = step_distance / abs(speed)
@@ -252,17 +261,20 @@ class NavThroughPosesClient(Node):
             costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
             if not costs or max(costs) >= self.ESCAPE_BLOCK_COST:
                 return False, f"{direction}弧线进入 lethal"
-            if sum(cost >= self.ESCAPE_TRIGGER_COST for cost in costs) > current_inscribed:
+            if sum(cost >= self.ESCAPE_TRIGGER_COST for cost in costs) > current_blocked:
                 return False, f"{direction}弧线更深入障碍"
         return True, ""
 
     def choose_escape_motion(self, preferred_turn):
-        alternatives = (
+        reverse = (
             (self.ESCAPE_SPEED, preferred_turn),
             (self.ESCAPE_SPEED, -preferred_turn),
+        )
+        forward = (
             (-self.ESCAPE_SPEED, preferred_turn),
             (-self.ESCAPE_SPEED, -preferred_turn),
         )
+        alternatives = reverse + forward if self._escape_prefer_reverse else forward + reverse
         reasons = []
         for speed, turn in alternatives:
             clear, reason = self.escape_path_is_clear(speed, turn)
@@ -271,12 +283,13 @@ class NavThroughPosesClient(Node):
             reasons.append(reason)
         return None, None, "；".join(reasons)
 
-    def request_qr_escape(self, reason):
+    def request_qr_escape(self, reason, prefer_reverse=False):
         """二维码路线的所有脱困触发统一取消任务，再进入同一脱困状态。"""
         if not self.first_phase_done or self.qr_result is None or self._qr_replan_requested:
             return
         self._qr_replan_requested = True
         self._qr_escape_replan_pending = True
+        self._escape_prefer_reverse = prefer_reverse
         self.get_logger().warn(f"[脱困] {reason}，取消当前导航并选择安全动作")
         if self._goal_handle is not None and not self._goal_pending:
             self._goal_handle.cancel_goal_async().add_done_callback(self.cancel_response_callback)
@@ -447,25 +460,13 @@ class NavThroughPosesClient(Node):
         if not self.first_phase_done:
             return
 
-        now = self.get_clock().now().nanoseconds / 1e9
-        if self._qr_target_index != target_index:
-            self._qr_target_index = target_index
-            self._qr_target_started_at = now
-        elif now - self._qr_target_started_at >= self.QR_POINT_TIMEOUT:
-            if self._qr_replan_requested:
-                return
-            if target_index < len(self.route_poses()) - 1:
-                self._qr_route_offset = target_index + 1
-                self.request_qr_escape(
-                    f"目标[{target_index + 1}] 已追踪 {self.QR_POINT_TIMEOUT:.0f}s，"
-                    f"无论是否仍有位移均跳过，脱困后从目标[{self._qr_route_offset + 1}]继续"
-                )
-            else:
-                self.request_qr_escape(
-                    f"最终目标已追踪 {self.QR_POINT_TIMEOUT:.0f}s，禁止跳过，仅脱困后重试"
-                )
+        # 当前二维码目标一旦进入完成半径，立即提交并从 Nav2 窗口删除；
+        # 不再等待 number_of_poses_remaining，也不做连续帧确认。
+        if distance <= self.POINT_REACHED_RADIUS:
+            self._complete_qr_target_by_distance(target_index, distance)
             return
 
+        now = self.get_clock().now().nanoseconds / 1e9
         moved = self._qr_last_amcl is None or math.hypot(
             amcl_x - self._qr_last_amcl[0], amcl_y - self._qr_last_amcl[1]
         ) >= 0.03
@@ -486,15 +487,121 @@ class NavThroughPosesClient(Node):
             return
 
         route_poses = self.route_poses()
-        if target_index < len(route_poses) - 1:
+        if target_index < len(route_poses) - 1 and self._target_is_passed(target_index):
             self._qr_route_offset = target_index + 1
             reason = (
-                f"{self._qr_stall_timeout:.0f}s 无位移，跳过目标[{target_index + 1}]，"
+                f"{self._qr_stall_timeout:.0f}s 无位移但已确认经过目标[{target_index + 1}]，"
                 f"脱困后从目标[{self._qr_route_offset + 1}]继续"
             )
         else:
-            reason = "最终回点无位移，禁止跳过，仅脱困后重试最终目标"
+            reason = (
+                f"{self._qr_stall_timeout:.0f}s 无位移且未确认经过目标[{target_index + 1}]，"
+                "保留当前目标并重规划"
+            )
         self.request_qr_escape(reason)
+
+    def _complete_qr_target_by_distance(self, target_index, distance):
+        """按 AMCL 距离立即提交当前及其之前已确认的窗口点。"""
+        if self._qr_replan_requested or self._qr_point_completion_pending:
+            return
+
+        local_completed = target_index - self._active_route_offset + 1
+        if local_completed <= 0 or not self._active_route_poses:
+            return
+        local_completed = min(local_completed, len(self._active_route_poses))
+
+        old_offset = self._qr_route_offset
+        self._qr_route_offset = min(
+            len(self._qr_route_poses), old_offset + local_completed
+        )
+        self._last_visited = None
+        self._qr_point_completion_pending = True
+        self._qr_replan_requested = True
+        self._qr_escape_replan_pending = False
+        self.get_logger().info(
+            f"[点完成] 目标[{target_index + 1}] 距离={distance:.3f}m "
+            f"<= {self.POINT_REACHED_RADIUS:.2f}m，立即删除并提交；"
+            f"窗口提交 {local_completed} 个，路线索引 "
+            f"{old_offset + 1} -> {self._qr_route_offset + 1}"
+        )
+
+        if self._goal_handle is None or self._goal_pending:
+            self._qr_point_completion_pending = False
+            if self._qr_route_offset >= len(self._qr_route_poses):
+                self.get_logger().info("所有路点导航完成！")
+                rclpy.shutdown()
+            else:
+                self.resend_qr_route()
+            return
+
+        self._goal_handle.cancel_goal_async().add_done_callback(
+            self.cancel_response_callback
+        )
+
+    def _target_is_passed(self, target_index):
+        """确认车辆沿当前路线方向经过目标，而不是仅仅离目标变远。"""
+        route = self._qr_route_poses
+        if self.amcl_pose is None or target_index <= 0 or target_index >= len(route):
+            return False
+        previous = route[target_index - 1].pose.position
+        target = route[target_index].pose.position
+        px, py, _ = self.amcl_pose
+        dx = target.x - previous.x
+        dy = target.y - previous.y
+        length_sq = dx * dx + dy * dy
+        if length_sq < 1.0e-6:
+            return False
+        projection = ((px - previous.x) * dx + (py - previous.y) * dy) / length_sq
+        lateral = abs((px - previous.x) * dy - (py - previous.y) * dx) / math.sqrt(length_sq)
+        return projection >= 1.0 and lateral <= self.QR_PASS_CORRIDOR
+
+    def _commit_window_progress(self, reason):
+        """只按 AMCL 距离提交连续完成的窗口点，不信任 Nav2 的 visited 计数。"""
+        if not self.first_phase_done or not self._active_route_poses:
+            return 0
+        completed = self._count_reached_active_targets()
+        if completed:
+            old_offset = self._qr_route_offset
+            self._qr_route_offset = min(
+                len(self._qr_route_poses), self._qr_route_offset + completed
+            )
+            self.get_logger().info(
+                f"[进度提交] {reason}：窗口完成 {completed} 个点，"
+                f"路线索引 {old_offset + 1} -> {self._qr_route_offset + 1}"
+            )
+        self._last_visited = None
+        return completed
+
+    def _count_reached_active_targets(self):
+        """返回从当前窗口首点开始、连续进入完成半径的点数。"""
+        if self.amcl_pose is None:
+            return 0
+        amcl_x, amcl_y, _ = self.amcl_pose
+        completed = 0
+        for pose in self._active_route_poses:
+            target = pose.pose.position
+            if math.hypot(target.x - amcl_x, target.y - amcl_y) > self.POINT_REACHED_RADIUS:
+                break
+            completed += 1
+        return completed
+
+    def _commit_successful_window(self):
+        """Nav2 成功后只提交 AMCL 已实际进入完成半径的连续点。"""
+        count = self._count_reached_active_targets()
+        if count == 0:
+            self.get_logger().warn(
+                "Nav2 返回 SUCCEEDED，但当前二维码目标未进入 "
+                f"{self.POINT_REACHED_RADIUS:.2f}m；保留当前点并重发"
+            )
+            self._last_visited = None
+            return
+        old_offset = self._qr_route_offset
+        self._qr_route_offset = min(len(self._qr_route_poses), old_offset + count)
+        self.get_logger().info(
+            f"[进度提交] 窗口成功：{count} 个点，"
+            f"路线索引 {old_offset + 1} -> {self._qr_route_offset + 1}"
+        )
+        self._last_visited = None
 
     def prepare_qr_escape(self):
         """基于当前 AMCL 统一初始化目标朝向与首个安全脱困动作。"""
@@ -620,42 +727,59 @@ class NavThroughPosesClient(Node):
         self._escape_speed = 0.0
         self._qr_escape_turn = 0.0
         self._escape_preferred_turn = 0.0
+        self._escape_prefer_reverse = False
         self._qr_escape_distance = 0.22
         self._escape_wait_logged_at = None
 
     def resend_qr_route(self):
+        self._commit_window_progress("重新规划前")
         route_poses = self.route_poses()
         remaining = route_poses[self._qr_route_offset:]
         if not remaining:
             self.get_logger().error("[追点] 重发时没有剩余路点，保留最终目标逻辑")
             return
+        window = remaining[:self._qr_window_size]
         self._last_visited = None
         self._qr_last_progress_time = None
         self._qr_last_amcl = None
         self._qr_last_remaining = None
+        self._escape_prefer_reverse = False
         self._qr_replan_requested = False
-        self._active_route_poses = remaining
+        self._active_route_poses = window
         self._active_route_offset = self._qr_route_offset
-        self.total_poses = len(remaining)
+        self.total_poses = len(window)
         self.get_logger().warn(
             f"[追点] 重新发送剩余路线：起始逻辑点={self._qr_route_offset + 1}，"
-            f"剩余={len(remaining)}"
+            f"本窗口={len(window)}，全路线剩余={len(remaining)}"
         )
-        self.send_goal(remaining)
+        self.send_goal(window)
 
     def retry_first_phase_route(self):
-        """全局图短暂误判起点时，保留 dating.csv 并请求新的规划。"""
+        """只重发首阶段当前窗口，避免后续点阻塞起步。"""
         if self._first_phase_retry_timer is not None:
             self._first_phase_retry_timer.cancel()
             self._first_phase_retry_timer = None
         if self.first_phase_done or self.qr_result is not None:
             return
+        self.get_logger().warn("[首阶段] 当前窗口规划失败但局部未 lethal，重发当前 dating 点")
+        self.resend_dating_route()
+
+    def resend_dating_route(self):
+        """首阶段按单点窗口规划，后续点不能阻塞当前点起步。"""
+        remaining = self._dating_route_poses[self._dating_route_offset:]
+        if not remaining:
+            self.get_logger().error("[首阶段] 重发时没有剩余 dating 路点")
+            return
+        window = remaining[:self.DATING_WINDOW_SIZE]
         self._last_visited = None
-        self._active_route_poses = self._dating_route_poses
-        self._active_route_offset = 0
-        self.total_poses = len(self._dating_route_poses)
-        self.get_logger().warn("[首阶段] 全局规划失败但局部未 lethal，重发 dating.csv 重新规划")
-        self.send_goal(self._dating_route_poses)
+        self._active_route_poses = window
+        self._active_route_offset = self._dating_route_offset
+        self.total_poses = len(window)
+        self.get_logger().info(
+            f"[首阶段] 发送窗口：逻辑点 {self._dating_route_offset + 1}/"
+            f"{len(self._dating_route_poses)}，本窗口 {len(window)} 个点"
+        )
+        self.send_goal(window)
 
     def goal_response_callback(self, future):
         self._goal_pending = False
@@ -716,7 +840,12 @@ class NavThroughPosesClient(Node):
             if self._qr_escape_replan_pending:
                 self._qr_escape_replan_pending = False
                 self.start_qr_escape()
+            elif self._qr_route_offset >= len(self._qr_route_poses):
+                self._qr_point_completion_pending = False
+                self.get_logger().info("所有路点导航完成！")
+                rclpy.shutdown()
             else:
+                self._qr_point_completion_pending = False
                 self.resend_qr_route()
             return
 
@@ -742,31 +871,44 @@ class NavThroughPosesClient(Node):
                         f"dating.csv 规划 ABORTED，局部车体已 lethal({local_cost})，保持停车"
                     )
                 return
-            self.first_phase_done = True
             if status == GoalStatus.STATUS_CANCELED and self.qr_result is not None:
                 self.get_logger().warn("第一阶段因扫码被主动取消，开始执行二维码路线")
                 self.first_phase_done = True
                 self.execute_next_phase()
                 return
-            elif self.qr_result is None:
+            if status != GoalStatus.STATUS_SUCCEEDED:
+                self.get_logger().error(f"dating.csv 窗口未成功完成，状态：{status_name}")
+                return
+            self._dating_route_offset += len(self._active_route_poses)
+            if self._dating_route_offset < len(self._dating_route_poses):
+                self.resend_dating_route()
+                return
+            self.first_phase_done = True
+            if self.qr_result is None:
                 self.get_logger().info("dating.csv 已完成，等待二维码识别...")
             else:
                 self.execute_next_phase()
             return
 
         if status == GoalStatus.STATUS_ABORTED:
+            self._commit_window_progress("Nav2 ABORTED 后")
             route_poses = self.route_poses()
-            current_index = self._qr_route_offset + (
-                self._last_visited if self._last_visited is not None else 0
-            )
-            if current_index < len(route_poses) - 1:
+            current_index = self._qr_route_offset
+            if current_index < len(route_poses):
                 attempts = self._qr_escape_attempts.get(current_index, 0)
-                self._qr_route_offset = current_index if attempts == 0 else current_index + 1
+                if current_index < len(route_poses) - 1 and attempts > 0 \
+                        and self._target_is_passed(current_index):
+                    self._qr_route_offset = current_index + 1
                 self._qr_escape_attempts[current_index] = attempts + 1
-                self.request_qr_escape(
-                    f"Nav2 返回 ABORTED，目标[{current_index + 1}]"
-                    + (" 首次失败，脱困后重试" if attempts == 0 else " 再次失败，脱困后跳过")
-                )
+                if current_index == len(route_poses) - 1:
+                    reason = f"Nav2 返回 ABORTED，最终目标[{current_index + 1}]，脱困后重试"
+                else:
+                    reason = (
+                        f"Nav2 返回 ABORTED，目标[{current_index + 1}]"
+                        + (" 首次失败，脱困后重试" if attempts == 0
+                           else " 再次失败，脱困后继续当前目标或按经过条件推进")
+                    )
+                self.request_qr_escape(reason)
                 return
 
             if not self.first_phase_done:
@@ -776,6 +918,11 @@ class NavThroughPosesClient(Node):
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(f"二维码路线未成功完成，状态：{status_name}")
             rclpy.shutdown()
+            return
+        self._commit_successful_window()
+        if self._qr_route_offset < len(self._qr_route_poses):
+            self._qr_replan_requested = False
+            self.resend_qr_route()
             return
         self.get_logger().info("所有路点导航完成！")
         rclpy.shutdown()
@@ -814,15 +961,16 @@ class NavThroughPosesClient(Node):
         self._qr_last_progress_time = None
         self._qr_last_amcl = None
         self._qr_last_remaining = None
-        self._qr_target_index = None
-        self._qr_target_started_at = None
         self._qr_escape_attempts = {}
         self._active_route_poses = next_poses
         self._active_route_offset = 0
         self.photo_triggered = False
         self._last_visited = None
-        self.get_logger().info(f"二维码路线整段导航启动：共 {self.total_poses} 个点")
-        self.send_goal(next_poses)
+        self.get_logger().info(
+            f"二维码路线窗口导航启动：全路线 {self.total_poses} 个点，"
+            f"首窗口最多 {self._qr_window_size} 个点"
+        )
+        self.resend_qr_route()
 
     def make_pose(self, x, y, z, w):
         pose = PoseStamped()
@@ -844,7 +992,8 @@ class NavThroughPosesClient(Node):
                 self.get_logger().info(
                     "剩余距离：{0:.2f} m | 已过 {1}/{2} 个点".format(remaining, visited, self.total_poses)
                 )
-                self.log_amcl(f"到达路点 {visited}")
+                global_index = self._active_route_offset + visited
+                self.log_amcl(f"到达路线点 {global_index}")
                 self._last_visited = visited
             self._qr_last_remaining = visited
         else:
@@ -885,10 +1034,9 @@ def main(args=None):
     client.get_logger().info("h1 已启动：先执行 dating.csv，扫码后切换对应路线")
     client.total_poses = len(poses)
     client._dating_route_poses = poses
+    client._dating_route_offset = 0
     client._qr_escape_attempts = {}
-    client._active_route_poses = poses
-    client._active_route_offset = 0
-    client.send_goal(poses)
+    client.resend_dating_route()
     rclpy.spin(client)
 
 if __name__ == '__main__':
