@@ -90,7 +90,7 @@ class NavThroughPosesClient(Node):
         """图生文触发：AMCL 位姿进入允许区域时触发一次（仅触发一次）。
 
         允许触发区域（由循环方向决定，二维码或兜底参数）：
-        - 顺时针循环：x∈[3.7,4.3]，y∈[3.7,4.3]
+        - 顺时针循环：x∈[3.0,4.3]，y∈[3.7,4.3]（x 从 3 开始：实际路径最大 x≈3.1）
         - 逆时针循环：x∈[0.7,1.3]，y∈[3.7,4.3]
         """
         if self.photo_triggered:      # 已触发过 → 不再触发
@@ -102,9 +102,9 @@ class NavThroughPosesClient(Node):
 
         x, y, _ = self.amcl_pose
         if self.loop_direction == 1:
-            # 顺时针循环
-            allowed = (3.7 <= x <= 4.3) and (3.7 <= y <= 4.3)
-            region = "顺时针(3.7-4.3, 3.7-4.3)"
+            # 顺时针循环（触发区 x 从 3 开始：车实际路径最大 x≈3.1，原 3.7 够不着）
+            allowed = (3.0 <= x <= 4.3) and (3.7 <= y <= 4.3)
+            region = "顺时针(3.0-4.3, 3.7-4.3)"
         else:
             # 逆时针循环
             allowed = (0.7 <= x <= 1.3) and (3.7 <= y <= 4.3)
