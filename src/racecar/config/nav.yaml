@@ -123,10 +123,10 @@ controller_server:
       batch_size: 800                    # 每次撒出的预测轨迹数
       # vx_std 收窄：速度采样集中到低速区，近障碍时最优轨迹自然减速
       # （近似“近障碍自动限速”），空旷段仍由 PathFollowCritic 拉到 vx_max。
-      vx_std: 0.20                       
+      vx_std: 0.15                       
       vy_std: 0.0                        
       # wz_std 收窄：转向采样更平滑，减少高速大转向扫到贴路线锥桶。
-      wz_std: 0.6                        
+      wz_std: 0.5                        
       vx_max: 0.55                       # 空旷段最高前向速度
       vx_min: -0.20                      # 保留倒车能力，同时限制正常倒车速度
       vy_max: 0.0
@@ -165,24 +165,27 @@ controller_server:
         cost_weight: 5.0                 # 空旷段优先正向行驶，保留脱困倒车能力
         threshold_to_consider: 0.5
       ObstaclesCritic:
-        # 0.1~0.2m 距离内排斥更强：转弯绕锥桶时更早远离，减少高速贴障。
-        repulsion_weight: 25.0
+        # 0.1~0.25m 距离内排斥更强：转弯绕锥桶时更早远离，减少高速贴障。
+        repulsion_weight: 40.0
         critical_weight: 80.0
         consider_footprint: true
         collision_cost: 10000.0          
-        # 0.12m 仍允许 0.3m 级缝隙挤过，但开阔段不再贴着锥桶 5cm 走，
-        # 避免上一轮“敢挤变贴着开”导致的大量碰障。
-        collision_margin_distance: 0.12
+        # 0.25m 开始规避：0.55m/s 下留出约 0.45s 反应时间（Ackermann 最小
+        # 半径 0.35m 完成绕行所需时间），避免 0.12m 才反应导致"贴脸必撞"。
+        collision_margin_distance: 0.25
         inflation_radius: 0.20
         cost_scaling_factor: 10.0
         near_goal_distance: 0.5
       PathAlignCritic:
         cost_power: 1
-        cost_weight: 3.0
+        # 4.5：轨迹与 Smac 路径对齐约束增强——走廊里小偏差自动修正，
+        # 避免 MPPI 因单侧贴障碍就“自由发挥”大转向掉出走廊。
+        cost_weight: 4.5
         max_heuristic_dist: 1.5
       PathFollowCritic:
         cost_power: 1
-        cost_weight: 12.0
+        # 16：更坚定跟随规划路径（对应 y=4 走廊转角打多掉出走廊的问题）
+        cost_weight: 16.0
         offset_from_furthest: 20
       PathAngleCritic:
         cost_power: 1
@@ -334,7 +337,7 @@ planner_server:
       # 正常情况规划 <0.1s 完成，此上限只影响卡点。
       max_planning_time: 3.0                            
       motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 2.5
       
       downsample_costmap: false                          
       downsampling_factor: 2                            
@@ -347,14 +350,17 @@ planner_server:
       reverse_penalty: 1.2
       non_straight_penalty: 30.0
       change_penalty: 20.0                              
-      # 253 仍可穿（防卡死），但 cost_penalty 提高让路径优先绕开高代价区，
-      # 避免“允许穿过”退化成“默认贴着障碍走”。
-      cost_penalty: 28.0                                 
+      # 253 仍可穿（防卡死）；penalty 20 让“穿 0.3m 级缝”比“绕远 1-2m”
+      # 更便宜，路径更直接（28 时路径为躲 253 宁可绕远，浪费时间）。
+      cost_penalty: 20.0                                 
       
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
       wheelbase: 0.189
-      minimum_turning_radius: 0.40
+      # 0.35 对齐底盘实际最小转弯半径（0.189/tan30°≈0.327，MPPI 已按 0.35 执行）。
+      # Smac 用 0.40 会白白损失贴障碍起点的可规划空间，导致起点朝向
+      # 与目标方向差大时规划失败；对齐后更容易规划出脱困路径。
+      minimum_turning_radius: 0.35
       # 只把 254 真实障碍当不可通行；锥桶在 253 膨胀区内时仍能规划，
       # 避免“起点/通道被 253 判 lethal”导致 no valid path（issue #2457）。
       # 执行层 MPPI 仍按局部代价避障，安全性由 254 兜底。
@@ -370,7 +376,7 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 3.0
       motion_model_for_search: "REEDS_SHEPP"            # 允许倒车脱困
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 2.5
       # 精确路线不能把 0.06m 激光栅格再合并为 0.12m；否则车侧的近障碍
       # 会被放大到车体内，Smac 会把本可通行的起点误判为 lethal。
       downsample_costmap: false
@@ -380,12 +386,15 @@ planner_server:
       reverse_penalty: 1.2
       non_straight_penalty: 30.0
       change_penalty: 20.0
-      # 同 GridBased：允许 253 可穿，但路径优先绕开高代价区。
-      cost_penalty: 28.0
+      # 同 GridBased：253 可穿、路径更直接、优先绕开 254 真实障碍。
+      cost_penalty: 20.0
       cache_obstacle_heuristic: true
       max_steer_angle: 0.5236
       wheelbase: 0.189
-      minimum_turning_radius: 0.40
+      # 0.35 对齐底盘实际最小转弯半径（0.189/tan30°≈0.327，MPPI 已按 0.35 执行）。
+      # Smac 用 0.40 会白白损失贴障碍起点的可规划空间，导致起点朝向
+      # 与目标方向差大时规划失败；对齐后更容易规划出脱困路径。
+      minimum_turning_radius: 0.35
       is_reverse_cost: true
       is_holonomic_cost: false
       is_collision_checking_cost: false

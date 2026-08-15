@@ -13,6 +13,10 @@ from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 from openai import OpenAI
 
+# ===== 图生文分析图保存（每次覆盖，便于事后核对AI看到的画面） =====
+LOG_DIR = "/root/ros2_ws/logs"
+AI_FRAME_SAVE_PATH = os.path.join(LOG_DIR, "ai_analyze_frame.jpg")
+
 
 class MergedQRNode(Node):
     """合并版：双摄像头扫码 + 图生文 + image话题发布"""
@@ -173,12 +177,18 @@ class MergedQRNode(Node):
                 time.sleep(0.1)
 
     def depth_image_callback(self, msg):
-        """深度相机RGB帧到达 → 缓存帧 + 扫码"""
-        if self.qr_detected:
-            return
+        """深度相机RGB帧到达 → 缓存帧 + 扫码
+
+        注意：latest_depth_frame 必须始终更新（即使扫码成功后也要持续缓存），
+        否则之后触发的图生文会用到扫码时刻的旧帧（即"第一次二维码"的画面）。
+        """
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-            self.latest_depth_frame = frame
+            self.latest_depth_frame = frame  # 始终缓存最新帧，供图生文/网页端使用
+
+            # 扫码成功后不再重复识别二维码，但上面的帧缓存不受影响
+            if self.qr_detected:
+                return
 
             with self.scan_lock:
                 res, _ = self.detector.detectAndDecode(frame)
@@ -242,9 +252,25 @@ class MergedQRNode(Node):
         threading.Thread(target=self.ai_analyze, args=(self.latest_depth_frame.copy(),), daemon=True).start()
 
     def ai_analyze(self, frame):
-        """AI图生文：调用大模型描述画面"""
+        """AI图生文：裁剪顶部20%后调用大模型描述画面，并覆盖保存分析图到logs便于核对"""
         self.ai_processing = True
         try:
+            # 1) 裁剪顶部20%：画面主体（漫画人物）在下部，去掉上方无关背景
+            crop_h = int(frame.shape[0] * 0.2)
+            frame = frame[crop_h:, :]
+            self.get_logger().info(
+                f"图生文已裁剪顶部20%: 尺寸 {frame.shape[1]}x{frame.shape[0]}")
+
+            # 2) 覆盖保存本次实际发送给AI的图，便于事后查看
+            try:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                if cv2.imwrite(AI_FRAME_SAVE_PATH, frame):
+                    self.get_logger().info(f"图生文分析图已保存: {AI_FRAME_SAVE_PATH}")
+                else:
+                    self.get_logger().warn(f"图生文分析图保存失败: {AI_FRAME_SAVE_PATH}")
+            except Exception as e:
+                self.get_logger().warn(f"图生文分析图保存异常: {e}")
+
             _, buffer = cv2.imencode('.jpg', frame)
             base64_image = base64.b64encode(buffer).decode('utf-8')
 
