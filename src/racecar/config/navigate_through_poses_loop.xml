@@ -5,7 +5,8 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <!-- 单点规划失败交给 H1 的激光校验脱困，避免 Nav2 自己清图重试 6 轮后长时间原地等待。 -->
+    <RecoveryNode number_of_retries="2" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
@@ -14,9 +15,11 @@
                 路线客户端按短窗口和路线投影自行确认节点完成。
                 不再让 BT 隐式删除经过点，否则会与 h1 的比赛规则索引不同步。
               -->
-              <Fallback name="ComputeOrKeepCurrentPath">
+              <Fallback name="ComputePreciseOrFallbackPath">
                 <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="PreciseGridBased"/>
-                <IsPathValid path="{path}"/>
+                <!-- 精确规划因动态激光/膨胀失败时允许普通规划器尝试；其容差必须与 H1 的
+                     0.30m 路点完成半径一致，不能用“大容差成功”跳过比赛路点。 -->
+                <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
               </Fallback>
             </ReactiveSequence>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>

@@ -38,6 +38,8 @@ class NavThroughPosesClient(Node):
     # 二维码路线必须逐点提交，否则会把未到达的点一起删掉。
     QR_WINDOW_SIZE = 1
     QR_PASS_CORRIDOR = 0.45
+    # Nav2 备用规划器异常成功时，最多允许一次重试；连续无进展立即进入统一脱困。
+    QR_NO_PROGRESS_SUCCESS_LIMIT = 2
 
     def __init__(self):
         super().__init__('nav_through_poses_client')
@@ -65,6 +67,8 @@ class NavThroughPosesClient(Node):
         self._qr_escape_replan_pending = False
         self._qr_point_completion_pending = False
         self._qr_escape_attempts = {}
+        self._qr_no_progress_successes = 0
+        self._qr_final_goal_completed = False
         self._costmap_escape_hits = 0
         self._escape_requires_clear = False
         self._local_costmap = None
@@ -235,7 +239,7 @@ class NavThroughPosesClient(Node):
         return min(ranges) if ranges else None
 
     def escape_path_is_clear(self, speed, turn):
-        """检查前进或倒车弧线未来 0.15m 的车体扫掠区。"""
+        """检查脱困弧线；允许从当前 lethal 栅格逐步驶出，但禁止更深入。"""
         if self._local_costmap is None:
             return False, "无 local_costmap"
         forward = speed > 0.0
@@ -253,16 +257,28 @@ class NavThroughPosesClient(Node):
         current_costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
         current_blocked = sum(cost >= self.ESCAPE_TRIGGER_COST for cost in current_costs)
         step_distance = 0.025
+        # 车辆已经被代价地图判为 lethal 时，前几厘米仍可能落在同一栅格。
+        # 不能要求每个中间采样点立刻变成非 lethal，否则脱困永远不会开始。
+        # 只允许 lethal 数量保持或减少；一旦增加，说明运动方向在深入障碍。
+        if current_blocked == 0:
+            allow_existing_lethal = False
+        else:
+            allow_existing_lethal = True
         for _ in range(int(self.ESCAPE_DISTANCE / step_distance)):
             dt = step_distance / abs(speed)
             x += speed * math.cos(yaw) * dt
             y += speed * math.sin(yaw) * dt
             yaw += turn * dt
             costs = self.footprint_costs_at(self._local_costmap, x, y, yaw)
-            if not costs or max(costs) >= self.ESCAPE_BLOCK_COST:
-                return False, f"{direction}弧线进入 lethal"
-            if sum(cost >= self.ESCAPE_TRIGGER_COST for cost in costs) > current_blocked:
+            if not costs:
+                return False, f"{direction}弧线超出 costmap"
+            blocked = sum(cost >= self.ESCAPE_TRIGGER_COST for cost in costs)
+            if blocked > current_blocked:
                 return False, f"{direction}弧线更深入障碍"
+            if max(costs) >= self.ESCAPE_BLOCK_COST and not allow_existing_lethal:
+                return False, f"{direction}弧线进入 lethal"
+        if allow_existing_lethal:
+            return True, f"{direction}允许从当前 lethal 逐步脱出"
         return True, ""
 
     def choose_escape_motion(self, preferred_turn):
@@ -279,7 +295,7 @@ class NavThroughPosesClient(Node):
         for speed, turn in alternatives:
             clear, reason = self.escape_path_is_clear(speed, turn)
             if clear:
-                return speed, turn, ""
+                return speed, turn, reason
             reasons.append(reason)
         return None, None, "；".join(reasons)
 
@@ -287,6 +303,7 @@ class NavThroughPosesClient(Node):
         """二维码路线的所有脱困触发统一取消任务，再进入同一脱困状态。"""
         if not self.first_phase_done or self.qr_result is None or self._qr_replan_requested:
             return
+        self._qr_no_progress_successes = 0
         self._qr_replan_requested = True
         self._qr_escape_replan_pending = True
         self._escape_prefer_reverse = prefer_reverse
@@ -514,7 +531,10 @@ class NavThroughPosesClient(Node):
         self._qr_route_offset = min(
             len(self._qr_route_poses), old_offset + local_completed
         )
+        if self._qr_route_offset >= len(self._qr_route_poses):
+            self._qr_final_goal_completed = True
         self._last_visited = None
+        self._qr_no_progress_successes = 0
         self._qr_point_completion_pending = True
         self._qr_replan_requested = True
         self._qr_escape_replan_pending = False
@@ -528,8 +548,15 @@ class NavThroughPosesClient(Node):
         if self._goal_handle is None or self._goal_pending:
             self._qr_point_completion_pending = False
             if self._qr_route_offset >= len(self._qr_route_poses):
-                self.get_logger().info("所有路点导航完成！")
-                rclpy.shutdown()
+                if not self._qr_final_goal_completed:
+                    self._qr_route_offset = max(0, len(self._qr_route_poses) - 1)
+                    self.get_logger().error(
+                        "[最终回点保护] 索引到达末尾但最终目标未确认完成，重新发送最终目标"
+                    )
+                    self.resend_qr_route()
+                else:
+                    self.get_logger().info("所有路点导航完成！")
+                    rclpy.shutdown()
             else:
                 self.resend_qr_route()
             return
@@ -565,6 +592,8 @@ class NavThroughPosesClient(Node):
             self._qr_route_offset = min(
                 len(self._qr_route_poses), self._qr_route_offset + completed
             )
+            if self._qr_route_offset >= len(self._qr_route_poses):
+                self._qr_final_goal_completed = True
             self.get_logger().info(
                 f"[进度提交] {reason}：窗口完成 {completed} 个点，"
                 f"路线索引 {old_offset + 1} -> {self._qr_route_offset + 1}"
@@ -594,14 +623,18 @@ class NavThroughPosesClient(Node):
                 f"{self.POINT_REACHED_RADIUS:.2f}m；保留当前点并重发"
             )
             self._last_visited = None
-            return
+            return 0
         old_offset = self._qr_route_offset
         self._qr_route_offset = min(len(self._qr_route_poses), old_offset + count)
+        if self._qr_route_offset >= len(self._qr_route_poses):
+            self._qr_final_goal_completed = True
         self.get_logger().info(
             f"[进度提交] 窗口成功：{count} 个点，"
             f"路线索引 {old_offset + 1} -> {self._qr_route_offset + 1}"
         )
         self._last_visited = None
+        self._qr_no_progress_successes = 0
+        return count
 
     def prepare_qr_escape(self):
         """基于当前 AMCL 统一初始化目标朝向与首个安全脱困动作。"""
@@ -633,6 +666,8 @@ class NavThroughPosesClient(Node):
         else:
             self._escape_speed = selected_speed
             self._qr_escape_turn = selected_turn
+            if reason:
+                self.get_logger().info(f"[脱困] 轨迹检查通过：{reason}")
             # 后方空间足够时多退一点；空间紧时保留最小脱困距离，不能越过后方障碍。
             if selected_speed < 0.0:
                 rear_clearance = self.scan_clearance(False)
@@ -732,12 +767,22 @@ class NavThroughPosesClient(Node):
         self._escape_wait_logged_at = None
 
     def resend_qr_route(self):
-        self._commit_window_progress("重新规划前")
+        # 进度只由结果/脱困处理器提交一次；重发函数不能再次提交旧窗口。
         route_poses = self.route_poses()
         remaining = route_poses[self._qr_route_offset:]
         if not remaining:
-            self.get_logger().error("[追点] 重发时没有剩余路点，保留最终目标逻辑")
-            return
+            if self._qr_final_goal_completed:
+                self.get_logger().info("[追点] 最终回点已确认完成，无剩余路点")
+                return
+            if route_poses:
+                self._qr_route_offset = len(route_poses) - 1
+                remaining = route_poses[self._qr_route_offset:]
+                self.get_logger().error(
+                    "[最终回点保护] 重发前发现末尾索引异常，回退到最后一个目标"
+                )
+            else:
+                self.get_logger().error("[追点] 路线为空，无法发送最终目标")
+                return
         window = remaining[:self._qr_window_size]
         self._last_visited = None
         self._qr_last_progress_time = None
@@ -748,6 +793,11 @@ class NavThroughPosesClient(Node):
         self._active_route_poses = window
         self._active_route_offset = self._qr_route_offset
         self.total_poses = len(window)
+        if self._active_route_offset + len(window) >= len(route_poses):
+            final_target = window[-1].pose.position
+            self.get_logger().warn(
+                f"[最终回点] 已发送目标 x={final_target.x:.3f} y={final_target.y:.3f}"
+            )
         self.get_logger().warn(
             f"[追点] 重新发送剩余路线：起始逻辑点={self._qr_route_offset + 1}，"
             f"本窗口={len(window)}，全路线剩余={len(remaining)}"
@@ -842,8 +892,15 @@ class NavThroughPosesClient(Node):
                 self.start_qr_escape()
             elif self._qr_route_offset >= len(self._qr_route_poses):
                 self._qr_point_completion_pending = False
-                self.get_logger().info("所有路点导航完成！")
-                rclpy.shutdown()
+                if not self._qr_final_goal_completed:
+                    self._qr_route_offset = max(0, len(self._qr_route_poses) - 1)
+                    self.get_logger().error(
+                        "[最终回点保护] 重规划回调到达末尾但最终目标未完成，重新发送最终目标"
+                    )
+                    self.resend_qr_route()
+                else:
+                    self.get_logger().info("所有路点导航完成！")
+                    rclpy.shutdown()
             else:
                 self._qr_point_completion_pending = False
                 self.resend_qr_route()
@@ -919,9 +976,35 @@ class NavThroughPosesClient(Node):
             self.get_logger().error(f"二维码路线未成功完成，状态：{status_name}")
             rclpy.shutdown()
             return
-        self._commit_successful_window()
+        completed = self._commit_successful_window()
+        if completed == 0:
+            self._qr_no_progress_successes += 1
+            current = self.amcl_pose
+            target = self._active_route_poses[0].pose.position if self._active_route_poses else None
+            if current is not None and target is not None:
+                distance = math.hypot(target.x - current[0], target.y - current[1])
+                self.get_logger().warn(
+                    f"[假成功防护] Nav2 连续无进展成功 "
+                    f"{self._qr_no_progress_successes}/{self.QR_NO_PROGRESS_SUCCESS_LIMIT} 次，"
+                    f"当前 AMCL=({current[0]:.3f},{current[1]:.3f})，"
+                    f"目标=({target.x:.3f},{target.y:.3f})，距离={distance:.3f}m"
+                )
+            if self._qr_no_progress_successes >= self.QR_NO_PROGRESS_SUCCESS_LIMIT:
+                self.request_qr_escape(
+                    "Nav2 连续返回 SUCCEEDED 但实际未进入完成半径，"
+                    "停止重发并执行统一脱困",
+                    prefer_reverse=True,
+                )
+                return
         if self._qr_route_offset < len(self._qr_route_poses):
             self._qr_replan_requested = False
+            self.resend_qr_route()
+            return
+        if not self._qr_final_goal_completed:
+            self._qr_route_offset = max(0, len(self._qr_route_poses) - 1)
+            self.get_logger().error(
+                "[最终回点保护] Nav2 成功但最终目标未确认完成，重新发送最终目标"
+            )
             self.resend_qr_route()
             return
         self.get_logger().info("所有路点导航完成！")
@@ -962,6 +1045,8 @@ class NavThroughPosesClient(Node):
         self._qr_last_amcl = None
         self._qr_last_remaining = None
         self._qr_escape_attempts = {}
+        self._qr_no_progress_successes = 0
+        self._qr_final_goal_completed = False
         self._active_route_poses = next_poses
         self._active_route_offset = 0
         self.photo_triggered = False

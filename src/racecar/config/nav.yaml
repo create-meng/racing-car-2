@@ -225,6 +225,10 @@ local_costmap:
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # 无回波束也用于清除旧动态障碍，避免锥桶/激光残影长期留在局部图。
+          inf_is_valid: true
+          observation_persistence: 0.0
+          expected_update_rate: 0.2
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
           obstacle_max_range: 4.5
@@ -273,6 +277,10 @@ global_costmap:
           clearing: true
           marking: true
           data_type: "LaserScan"
+          # 无回波束也用于清除旧动态障碍，避免全局图保留已离开的障碍。
+          inf_is_valid: true
+          observation_persistence: 0.0
+          expected_update_rate: 0.2
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
           obstacle_max_range: 4.5
@@ -309,7 +317,8 @@ planner_server:
 
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
-      tolerance: 1.0
+      # 备用规划器也不能用大容差伪报路点成功；H1 的比赛完成半径是 0.30m。
+      tolerance: 0.30
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
