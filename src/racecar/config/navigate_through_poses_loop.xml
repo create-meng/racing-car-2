@@ -10,11 +10,15 @@
         <RateController hz="2.0">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.4"/>
+              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.5"/>
               <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
             </ReactiveSequence>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
+        </RateController>
+        <!-- 高频删点：单独 10Hz 检查已到达的中间路点，避免车高速经过时错过 0.5s 的删除窗口 -->
+        <RateController hz="10.0" name="HighFreqRemovePassedGoals">
+          <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.5"/>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="FollowPath"/>
