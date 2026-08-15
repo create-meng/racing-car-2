@@ -11,6 +11,12 @@ import os
 import re
 import math
 
+# ===== 扫码失败兜底方向（改这里即可，无需额外命令行参数）=====
+# 二维码没扫到时，按此方向继续跑，不再停车：
+#   1 = 顺时针（shunshizhen1.csv）
+#   2 = 逆时针（test_1.csv）
+FALLBACK_DIRECTION = 1
+
 
 class NavThroughPosesClient(Node):
     def __init__(self):
@@ -33,10 +39,16 @@ class NavThroughPosesClient(Node):
         # 用于发布到达特定点时的文本
         self.text_pub = self.create_publisher(String, "/special_goal_topic", 10)
 
+        # 用于语音播报方向（/tts_text 由 voice_broadcast_node 播出）
+        self.tts_pub = self.create_publisher(String, "/tts_text", 10)
+
         # 拍照触发标志与路点统计
         self.photo_triggered = False  # 图生文已触发标志（仅触发一次）
         self.total_poses = 0
         self.first_phase_done = False  # 标记第一阶段(dating.csv)是否完成
+
+        # 循环方向：1=顺时针 2=逆时针（扫码成功按奇偶定，失败按顶部 FALLBACK_DIRECTION 定）
+        self.loop_direction = None
 
         # 第二阶段(循环)状态：步骤A 先到第一个路点回正航向，步骤B 再正着跑完整圈
         self.loop_poses = None      # 循环全量路点 (PoseStamped 列表)
@@ -77,19 +89,19 @@ class NavThroughPosesClient(Node):
     def check_amcl_photo_trigger(self):
         """图生文触发：AMCL 位姿进入允许区域时触发一次（仅触发一次）。
 
-        允许触发区域（由二维码方向决定）：
-        - 顺时针循环（奇数）：x∈[3.7,4.3]，y∈[3.7,4.3]
-        - 逆时针循环（偶数）：x∈[0.7,1.3]，y∈[3.7,4.3]
+        允许触发区域（由循环方向决定，二维码或兜底参数）：
+        - 顺时针循环：x∈[3.7,4.3]，y∈[3.7,4.3]
+        - 逆时针循环：x∈[0.7,1.3]，y∈[3.7,4.3]
         """
         if self.photo_triggered:      # 已触发过 → 不再触发
             return
         if self.phase2_step != 1:     # 仅在整圈循环（步骤B）阶段触发
             return
-        if self.amcl_pose is None or self.qr_result is None:
+        if self.amcl_pose is None or self.loop_direction is None:
             return
 
         x, y, _ = self.amcl_pose
-        if self.qr_result % 2 == 1:
+        if self.loop_direction == 1:
             # 顺时针循环
             allowed = (3.7 <= x <= 4.3) and (3.7 <= y <= 4.3)
             region = "顺时针(3.7-4.3, 3.7-4.3)"
@@ -287,26 +299,40 @@ class NavThroughPosesClient(Node):
                     rclpy.spin_once(self, timeout_sec=0.1)
                 self.send_goal(self.loop_poses[start:])
 
+    def publish_tts(self, text):
+        """发布语音播报文本到 /tts_text（由 voice_broadcast_node 播出）。"""
+        msg = String()
+        msg.data = text
+        self.tts_pub.publish(msg)
+        self.get_logger().info(f"语音播报: {text}")
+
     def execute_next_phase(self):
+        # 第一阶段结束：先等二维码（最长 7 秒）
         if self.qr_result is None:
-            self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别...")
-            for i in range(200):
+            self.get_logger().info("dating.csv 跑完或被取消，等待二维码识别（最长 7 秒）...")
+            for i in range(70):
                 if self.qr_result is not None:
                     break
                 rclpy.spin_once(self, timeout_sec=0.1)
 
-        if self.qr_result is None:
-            self.get_logger().error("未收到二维码，导航结束")
-            rclpy.shutdown()
-            return
+        if self.qr_result is not None:
+            # ---- 扫码成功：奇数=顺时针，偶数=逆时针；播报 数字+方向 ----
+            self.loop_direction = 1 if self.qr_result % 2 == 1 else 2
+            dir_name = "顺时针" if self.loop_direction == 1 else "逆时针"
+            self.get_logger().info(f"使用二维码结果：{self.qr_result} → {dir_name}")
+            self.publish_tts(f"{self.qr_result}，{dir_name}")
+        else:
+            # ---- 扫码失败：按 h1.py 顶部 FALLBACK_DIRECTION 兜底；只播报方向 ----
+            self.loop_direction = FALLBACK_DIRECTION
+            dir_name = "顺时针" if self.loop_direction == 1 else "逆时针"
+            self.get_logger().warn(f"未收到二维码，按顶部参数兜底执行：{dir_name}")
+            self.publish_tts(dir_name)
 
-        self.get_logger().info(f"使用二维码结果：{self.qr_result}")
-
-        if self.qr_result % 2 == 1:
-            self.get_logger().info("奇数：执行 shunshizhen1.csv（顺时针循环）")
+        if self.loop_direction == 1:
+            self.get_logger().info("执行 shunshizhen1.csv（顺时针循环）")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/shunshizhen1.csv")
         else:
-            self.get_logger().info("偶数：执行 test_1.csv（逆时针循环）")
+            self.get_logger().info("执行 test_1.csv（逆时针循环）")
             next_wp = self.read_waypoints_from_csv("/root/ros2_ws/src/racecar/scripts/point/test_1.csv")
 
         # 图生文触发：由 AMCL 位姿区域触发（见 check_amcl_photo_trigger），

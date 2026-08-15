@@ -12,6 +12,11 @@ import base64
 import sys
 
 class AIVisionPublisher(Node):
+    # 发送给大模型前把图片缩到该宽度（保持比例）。qwen 视觉模型按分辨率切 patch
+    # 生成视觉 token：640x400 约 3.5s，320 宽约 1.1s（实测），缩小后推理快约 3 倍。
+    MAX_IMAGE_WIDTH = 320
+    JPEG_QUALITY = 80
+
     def __init__(self):
         super().__init__('ai_vision_publisher')
         self.get_logger().info("正在初始化 AI 视觉发布节点...")
@@ -66,20 +71,28 @@ class AIVisionPublisher(Node):
         threading.Thread(target=self.process_and_publish, args=(frame.copy(),), daemon=True).start()
 
     def process_and_publish(self, frame):
+        t_start = time.time()
         try:
-            # 编码
-            _, buffer = cv2.imencode('.jpg', frame)
+            # 1. 缩放图片：视觉模型按分辨率切 patch，图越小视觉 token 越少、推理越快
+            h, w = frame.shape[:2]
+            if w > self.MAX_IMAGE_WIDTH:
+                nh = int(h * self.MAX_IMAGE_WIDTH / w)
+                frame = cv2.resize(frame, (self.MAX_IMAGE_WIDTH, nh))
+
+            # 2. 编码（质量 80：数据量更小，上传更快，对识别影响很小）
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.JPEG_QUALITY])
             base64_image = base64.b64encode(buffer).decode('utf-8')
-            
-            # 推理
+
+            # 3. 推理
             description = self.get_image_description_base64(base64_image)
-            
-            # 发布
+
+            # 4. 发布
             if description and description not in ["描述生成失败", "描述提取异常"]:
                 msg = String()
                 msg.data = description
                 self.publisher_.publish(msg)
                 self.get_logger().info(f"发布成功: {msg.data}")
+            self.get_logger().info(f"图生文总耗时: {time.time()-t_start:.1f}s（图片 {w}x{h} → {frame.shape[1]}x{frame.shape[0]}）")
 
         except Exception as e:
             self.get_logger().error(f"处理流水线崩溃: {str(e)}")
@@ -94,7 +107,10 @@ class AIVisionPublisher(Node):
                     "role": "user", 
                     "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_str}"}},
-                        {"type": "text", "text": "请分析这个画面，只分析漫画人物，在30字以内描述，包括人物的性别，年龄，以及所在场景。"}
+                        # 赛事要求：描述需达到小学生看图写话水平，聚焦画面中立着的展板
+                        # （展板上的漫画人物），忽略周围环境。25 字以内：播报 0.4s/字，
+                        # 25 字≈10 秒封顶；字数越多播报越久。
+                        {"type": "text", "text": "画面中立着一块展板，展板上画有漫画人物。请用小学生看图写话的口吻，只描述展板上的人物（性别、年龄、穿着、在做什么），忽略周围环境，25字以内。"}
                     ]
                 }],
                 max_tokens=50,
