@@ -220,7 +220,7 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /scan_nav
+          topic: /scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -268,7 +268,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /scan_nav
+          topic: /scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true

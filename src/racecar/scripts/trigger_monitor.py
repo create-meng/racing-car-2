@@ -29,6 +29,7 @@ import json
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
@@ -63,9 +64,11 @@ class TriggerMonitor(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # ---- QoS ----
-        costmap_qos = QoSProfile(
-            depth=5,
-            reliability=ReliabilityPolicy.RELIABLE,
+        # 诊断订阅使用 BEST_EFFORT：它可以接收可靠发布者，也不会因传感器
+        # 发布者使用 BEST_EFFORT 而反向制造 QoS 不匹配。
+        diagnostic_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
         )
@@ -75,29 +78,14 @@ class TriggerMonitor(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
         )
-        cmd_qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-        )
-        # AMCL pose and waypoint goals are live state topics, not latched data.
-        # A volatile subscriber also remains compatible if a publisher uses
-        # transient-local durability, while the reverse is not true.
-        live_reliable_qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-        )
 
         # ---- 订阅 ----
         try:
             # costmap_raw 使用 nav2_msgs/Costmap，保留 0-255 原始代价。
             self.create_subscription(
-                Costmap, "/global_costmap/costmap_raw", self.cb_global_costmap, costmap_qos)
+                Costmap, "/global_costmap/costmap_raw", self.cb_global_costmap, diagnostic_qos)
             self.create_subscription(
-                Costmap, "/local_costmap/costmap_raw", self.cb_local_costmap, costmap_qos)
+                Costmap, "/local_costmap/costmap_raw", self.cb_local_costmap, diagnostic_qos)
             self.create_subscription(
                 OccupancyGrid,
                 "/map",
@@ -108,7 +96,7 @@ class TriggerMonitor(Node):
                 PoseWithCovarianceStamped,
                 "/amcl_pose",
                 self.cb_amcl,
-                live_reliable_qos,
+                diagnostic_qos,
             )
             self.create_subscription(
                 LaserScan,
@@ -126,23 +114,35 @@ class TriggerMonitor(Node):
                 Odometry,
                 "/odom_combined",
                 self.cb_odom,
-                qos_profile_sensor_data,
+                diagnostic_qos,
             )
             self.create_subscription(
                 PoseStamped,
                 "/goal_pose",
                 self.cb_goal,
-                live_reliable_qos,
+                diagnostic_qos,
             )
             self.create_subscription(
                 Twist,
                 "/cmd_vel",
                 self.cb_cmd,
-                cmd_qos,
+                diagnostic_qos,
             )
         except Exception as e:
             self.log(f"[ERROR] 订阅创建失败: {e}")
             raise
+        self.log(
+            "[SUB] 监控订阅已创建: "
+            "/scan(BEST_EFFORT/VOLATILE), "
+            "/scan_nav(BEST_EFFORT/VOLATILE), "
+            "/amcl_pose(BEST_EFFORT/VOLATILE), "
+            "/odom_combined(BEST_EFFORT/VOLATILE), "
+            "/cmd_vel(BEST_EFFORT/VOLATILE), "
+            "/goal_pose(BEST_EFFORT/VOLATILE), "
+            "/map(RELIABLE/TRANSIENT_LOCAL), "
+            "/global_costmap/costmap_raw(BEST_EFFORT/VOLATILE), "
+            "/local_costmap/costmap_raw(BEST_EFFORT/VOLATILE)"
+        )
 
         # ---- 状态 ----
         self.global_costmap = None  # nav2_msgs/Costmap (raw 0-255)
@@ -150,6 +150,10 @@ class TriggerMonitor(Node):
         self.static_map = None      # nav_msgs/OccupancyGrid (0-100 / -1)
         self.amcl_pose = None       # (x, y, yaw)
         self.amcl_cov = None        # covariance array (36)
+        self.amcl_count = 0
+        self.amcl_last_wall = None
+        self.amcl_stamp_ns = None
+        self.amcl_age = None
         self.prev_amcl = None       # (x, y, yaw)
         self.prev_amcl_t = None
         self.cmd_vel = (0.0, 0.0)  # (vx, wz)
@@ -158,6 +162,7 @@ class TriggerMonitor(Node):
         self.scan_nearest = None    # (距离, 雷达角度 rad)
         self.scan_sector_min = {}   # 前/左/后/右扇区最近距离
         self.scan_age = None        # 最新激光相对本机 ROS 时钟的年龄
+        self.scan_stamp_ns = None
         self.scan_frame = "--"
         self.scan_valid = 0
         self.scan_count = 0
@@ -166,9 +171,13 @@ class TriggerMonitor(Node):
         self.scan_period = None
         self.nav_scan_count = 0
         self.nav_scan_age = None
+        self.nav_scan_stamp_ns = None
+        self.goal_count = 0
+        self.cmd_count = 0
         self.odom_count = 0
         self.odom_last_wall = None
         self.odom_age = None
+        self.odom_stamp_ns = None
         self.odom_frame = "--"
         self.odom_child_frame = "--"
         self.global_costmap_count = 0
@@ -177,6 +186,17 @@ class TriggerMonitor(Node):
         self.local_costmap_last_wall = None
         self.global_costmap_period = None
         self.local_costmap_period = None
+        self.global_costmap_age = None
+        self.local_costmap_age = None
+        self.global_costmap_stamp_ns = None
+        self.local_costmap_stamp_ns = None
+        self.qos_topics = (
+            "/scan", "/scan_nav", "/amcl_pose", "/odom_combined", "/cmd_vel",
+            "/goal_pose", "/map", "/tf", "/tf_static", "/global_costmap/costmap_raw",
+            "/local_costmap/costmap_raw", "/global_costmap/costmap",
+            "/local_costmap/costmap",
+        )
+        self.qos_last_signature = None
         self.prev_near_obs = None   # 上一次最近障碍距离
         self.prev_cov = None        # 上一次协方差大小
         self.global_occ_counts = []  # 近 20 次全局 costmap 占据数
@@ -187,6 +207,7 @@ class TriggerMonitor(Node):
         # ---- 定时器 ----
         self.create_timer(0.5, self.periodic_snapshot)  # 2 Hz 状态快照
         self.create_timer(5.0, self.periodic_summary)   # 每 5s 一行摘要
+        self.create_timer(2.0, self.log_topic_qos)      # 端点变化时记录完整 QoS
 
         # ---- 启动 ----
         self.log("=" * 70)
@@ -194,7 +215,7 @@ class TriggerMonitor(Node):
             f"trigger_monitor 启动 | 日志: {self.log_path}"
         )
         self.log(
-            "订阅: /global_costmap/costmap_raw  /local_costmap/costmap_raw  "
+            "诊断订阅: /global_costmap/costmap_raw  /local_costmap/costmap_raw  "
             "/map  /amcl_pose  /scan  /scan_nav  /goal_pose  /cmd_vel"
         )
         self.log("=" * 70)
@@ -205,6 +226,8 @@ class TriggerMonitor(Node):
 
     def cb_global_costmap(self, msg):
         self.global_costmap = msg
+        self.global_costmap_stamp_ns = self._stamp_ns(msg.header.stamp)
+        self.global_costmap_age = self._stamp_age(msg.header.stamp)
         now = time.monotonic()
         if self.global_costmap_last_wall is not None:
             self.global_costmap_period = now - self.global_costmap_last_wall
@@ -213,6 +236,8 @@ class TriggerMonitor(Node):
 
     def cb_local_costmap(self, msg):
         self.local_costmap = msg
+        self.local_costmap_stamp_ns = self._stamp_ns(msg.header.stamp)
+        self.local_costmap_age = self._stamp_age(msg.header.stamp)
         now = time.monotonic()
         if self.local_costmap_last_wall is not None:
             self.local_costmap_period = now - self.local_costmap_last_wall
@@ -231,6 +256,12 @@ class TriggerMonitor(Node):
         )
         self.amcl_pose = (p.position.x, p.position.y, yaw)
         self.amcl_cov = msg.pose.covariance
+        self.amcl_count += 1
+        self.amcl_last_wall = time.monotonic()
+        stamp = msg.header.stamp
+        if stamp.sec or stamp.nanosec:
+            self.amcl_stamp_ns = self._stamp_ns(stamp)
+            self.amcl_age = self._stamp_age(stamp)
         self.check_amcl_jump()
 
     def cb_scan(self, msg):
@@ -270,15 +301,15 @@ class TriggerMonitor(Node):
         self.scan_frame = msg.header.frame_id or "<empty>"
         stamp = msg.header.stamp
         if stamp.sec or stamp.nanosec:
-            now = self.get_clock().now().nanoseconds
-            self.scan_age = (now - stamp.sec * 1_000_000_000 - stamp.nanosec) / 1_000_000_000
+            self.scan_stamp_ns = self._stamp_ns(stamp)
+            self.scan_age = self._stamp_age(stamp)
 
     def cb_nav_scan(self, msg):
         self.nav_scan_count += 1
         stamp = msg.header.stamp
         if stamp.sec or stamp.nanosec:
-            now = self.get_clock().now().nanoseconds
-            self.nav_scan_age = (now - stamp.sec * 1_000_000_000 - stamp.nanosec) / 1_000_000_000
+            self.nav_scan_stamp_ns = self._stamp_ns(stamp)
+            self.nav_scan_age = self._stamp_age(stamp)
 
     def cb_odom(self, msg):
         self.odom_count += 1
@@ -287,15 +318,71 @@ class TriggerMonitor(Node):
         self.odom_child_frame = msg.child_frame_id or "<empty>"
         stamp = msg.header.stamp
         if stamp.sec or stamp.nanosec:
-            now = self.get_clock().now().nanoseconds
-            self.odom_age = (now - stamp.sec * 1_000_000_000 - stamp.nanosec) / 1_000_000_000
+            self.odom_stamp_ns = self._stamp_ns(stamp)
+            self.odom_age = self._stamp_age(stamp)
 
     def cb_goal(self, msg):
         self.goal = (msg.pose.position.x, msg.pose.position.y)
+        self.goal_count += 1
         self.log(f"[GOAL] 收到新目标: ({self.goal[0]:.3f}, {self.goal[1]:.3f})")
 
     def cb_cmd(self, msg):
         self.cmd_vel = (msg.linear.x, msg.angular.z)
+        self.cmd_count += 1
+
+    @staticmethod
+    def _stamp_ns(stamp):
+        return stamp.sec * 1_000_000_000 + stamp.nanosec
+
+    def _stamp_age(self, stamp):
+        return (self.get_clock().now().nanoseconds - self._stamp_ns(stamp)) / 1_000_000_000
+
+    @staticmethod
+    def _qos_name(value):
+        return getattr(value, "name", str(value))
+
+    @classmethod
+    def _endpoint_text(cls, info):
+        qos = info.qos_profile
+        node = f"{info.node_namespace.rstrip('/')}/{info.node_name}".replace("//", "/")
+        return (
+            f"{node} type={info.topic_type} "
+            f"rel={cls._qos_name(qos.reliability)} "
+            f"dur={cls._qos_name(qos.durability)} "
+            f"hist={cls._qos_name(qos.history)} depth={qos.depth}"
+        )
+
+    def log_topic_qos(self):
+        """记录 ROS graph 中真实端点的 QoS，避免只看代码猜测不匹配。"""
+        lines = []
+        for topic in self.qos_topics:
+            try:
+                # 传入绝对话题名时必须允许 rclpy 正常解析名称。
+                # no_mangle=True 会让某些 ROS 2 版本返回空端点，造成假象 pubs=0/subs=0。
+                publishers = self.get_publishers_info_by_topic(topic, no_mangle=False)
+                subscriptions = self.get_subscriptions_info_by_topic(topic, no_mangle=False)
+            except Exception as exc:
+                lines.append(f"{topic} graph_error={type(exc).__name__}:{exc}")
+                continue
+            lines.append(f"{topic} pubs={len(publishers)} subs={len(subscriptions)}")
+            lines.extend(f"  PUB {self._endpoint_text(info)}" for info in publishers)
+            lines.extend(f"  SUB {self._endpoint_text(info)}" for info in subscriptions)
+            pub_rel = {self._qos_name(info.qos_profile.reliability) for info in publishers}
+            sub_rel = {self._qos_name(info.qos_profile.reliability) for info in subscriptions}
+            if "BEST_EFFORT" in " ".join(pub_rel) and "RELIABLE" in " ".join(sub_rel):
+                lines.append("  INCOMPATIBLE reliability: BEST_EFFORT publisher -> RELIABLE subscriber")
+            pub_dur = {self._qos_name(info.qos_profile.durability) for info in publishers}
+            sub_dur = {self._qos_name(info.qos_profile.durability) for info in subscriptions}
+            if "VOLATILE" in " ".join(pub_dur) and "TRANSIENT_LOCAL" in " ".join(sub_dur):
+                lines.append("  INCOMPATIBLE durability: VOLATILE publisher -> TRANSIENT_LOCAL subscriber")
+
+        signature = tuple(lines)
+        if signature == self.qos_last_signature:
+            return
+        self.qos_last_signature = signature
+        self.log("[QOS] ROS graph 端点变化（PUB/SUB 的实际 QoS）")
+        for line in lines:
+            self.log(f"[QOS] {line}")
 
     # ====================================================================
     # 工具
@@ -444,6 +531,13 @@ class TriggerMonitor(Node):
         entry["scan_valid"] = self.scan_valid
         entry["scan_count"] = self.scan_count
         entry["scan_period"] = self.scan_period
+        entry["amcl_count"] = self.amcl_count
+        entry["amcl_age"] = self.amcl_age
+        entry["odom_count"] = self.odom_count
+        entry["odom_age"] = self.odom_age
+        entry["odom_stamp_ns"] = self.odom_stamp_ns
+        entry["global_costmap_age"] = self.global_costmap_age
+        entry["local_costmap_age"] = self.local_costmap_age
         entry["global_cm_count"] = self.global_costmap_count
         entry["local_cm_count"] = self.local_costmap_count
 
@@ -476,25 +570,26 @@ class TriggerMonitor(Node):
     def periodic_summary(self):
         now = time.monotonic()
         scan_silent = self.scan_last_wall is None or now - self.scan_last_wall > 1.0
+        amcl_silent = self.amcl_last_wall is None or now - self.amcl_last_wall > 1.0
+        odom_silent = self.odom_last_wall is None or now - self.odom_last_wall > 1.0
+        global_cm_silent = self.global_costmap_last_wall is None or now - self.global_costmap_last_wall > 1.0
         local_cm_silent = self.local_costmap_last_wall is None or now - self.local_costmap_last_wall > 1.0
         if scan_silent:
             self.log(f"[LINK][HIGH] /scan 未收到或已中断: rx={self.scan_count} last={self.scan_last_wall}")
+        if amcl_silent:
+            self.log(f"[LINK][HIGH] /amcl_pose 未收到或已中断: rx={self.amcl_count} last={self.amcl_last_wall}")
+        if odom_silent:
+            self.log(f"[LINK][HIGH] /odom_combined 未收到或已中断: rx={self.odom_count} last={self.odom_last_wall}")
+        if global_cm_silent:
+            self.log(f"[LINK][HIGH] /global_costmap/costmap_raw 未收到或已中断: rx={self.global_costmap_count} last={self.global_costmap_last_wall}")
         if local_cm_silent:
-            self.log(f"[LINK][HIGH] /local_costmap/costmap 未收到或已中断: rx={self.local_costmap_count} last={self.local_costmap_last_wall}")
-        if self.amcl_pose is None:
-            self.log(
-                "[SUM] 等待 amcl_pose | "
-                f"publishers=(amcl:{self.count_publishers('/amcl_pose')},scan:{self.count_publishers('/scan')}) "
-                f"scan_rx={self.scan_count} age={self._age_text(self.scan_age)} frame={self.scan_frame} "
-                f"odom_rx={self.odom_count} age={self._age_text(self.odom_age)} "
-                f"frames={self.odom_frame}->{self.odom_child_frame} "
-                f"tf_now(odom->base_footprint)={self._transform_status('odom_combined', 'base_footprint')} "
-                f"tf_scan(odom->base_footprint)={self._scan_transform_status()} "
-                f"tf(base_footprint->laser)={self._transform_status('base_footprint', 'laser')}"
-            )
-            return
-        x, y, yaw = self.amcl_pose
-        g = self.cost_at(self.global_costmap, x, y)
+            self.log(f"[LINK][HIGH] /local_costmap/costmap_raw 未收到或已中断: rx={self.local_costmap_count} last={self.local_costmap_last_wall}")
+        pose_text = "none" if self.amcl_pose is None else (
+            f"({self.amcl_pose[0]:.2f},{self.amcl_pose[1]:.2f},"
+            f"{math.degrees(self.amcl_pose[2]):.1f}°)"
+        )
+        x, y, yaw = self.amcl_pose if self.amcl_pose is not None else (0.0, 0.0, 0.0)
+        g = self.cost_at(self.global_costmap, x, y) if self.amcl_pose is not None else None
         n = self.nearest_obstacle_local()
         nearest = "--" if self.scan_nearest is None else (
             f"{self.scan_nearest[0]:.2f}m@{math.degrees(self.scan_nearest[1]):.1f}deg"
@@ -504,11 +599,11 @@ class TriggerMonitor(Node):
             for name, distance in self.scan_sector_min.items()
         ) or "--"
         self.log(
-            f"[SUM] amcl=({x:.2f},{y:.2f},{math.degrees(yaw):.1f}°) "
+            f"[SUM] amcl={pose_text} "
             f"g_cost={g if g is not None else '--'} "
-            f"fp_max=(global:{self.max_cost(self.footprint_costs(self.global_costmap))},"
-            f"local:{self.max_cost(self.footprint_costs(self.local_costmap))},"
-            f"static:{self.max_cost(self.footprint_costs(self.static_map))}) "
+            f"fp_max=(global:{self.max_cost(self.footprint_costs(self.global_costmap)) if self.amcl_pose is not None else None},"
+            f"local:{self.max_cost(self.footprint_costs(self.local_costmap)) if self.amcl_pose is not None else None},"
+            f"static:{self.max_cost(self.footprint_costs(self.static_map)) if self.amcl_pose is not None else None}) "
             f"near_obs={f'{n:.2f}' if n else '--'} "
             f"scan_min={f'{self.scan_min:.2f}' if self.scan_min else '--'} "
             f"scan_nearest={nearest} sectors=({sectors}) "
@@ -520,6 +615,16 @@ class TriggerMonitor(Node):
             f"costmap_rx=(g:{self.global_costmap_count},l:{self.local_costmap_count}) "
             f"costmap_period=(g:{f'{self.global_costmap_period:.3f}s' if self.global_costmap_period else '--'},"
             f"l:{f'{self.local_costmap_period:.3f}s' if self.local_costmap_period else '--'}) "
+            f"costmap_age=(g:{self._age_text(self.global_costmap_age)},l:{self._age_text(self.local_costmap_age)}) "
+            f"topic_rx=(scan:{self.scan_count},amcl:{self.amcl_count},odom:{self.odom_count},"
+            f"goal:{self.goal_count},cmd:{self.cmd_count}) "
+            f"topic_age=(scan:{self._age_text(self.scan_age)},amcl:{self._age_text(self.amcl_age)},"
+            f"odom:{self._age_text(self.odom_age)}) "
+            f"odom_frame={self.odom_frame}->{self.odom_child_frame} "
+            f"tf_chain=(map->odom:{self._tf_timing('map', 'odom_combined')};"
+            f"odom->base:{self._tf_timing('odom_combined', 'base_footprint')};"
+            f"map->base:{self._tf_timing('map', 'base_footprint')}) "
+            f"tf_scan(map<-laser)={self._scan_tf_timing('map', self.scan_frame)} "
             f"cmd=({self.cmd_vel[0]:.2f},{self.cmd_vel[1]:.2f})"
         )
 
@@ -554,6 +659,9 @@ class TriggerMonitor(Node):
                 f"scan_age={e['scan_age']} "
                 f"scan_frame={e['scan_frame']} valid={e['scan_valid']} "
                 f"scan_rx={e['scan_count']} period={e['scan_period']} "
+                f"topic_rx=(amcl:{e['amcl_count']},odom:{e['odom_count']}) "
+                f"topic_age=(amcl:{e['amcl_age']},odom:{e['odom_age']}) "
+                f"costmap_age=(g:{e['global_costmap_age']},l:{e['local_costmap_age']}) "
                 f"costmap_rx=(g:{e['global_cm_count']},l:{e['local_cm_count']}) "
                 f"cmd=({e['cmd'][0]:.2f},{e['cmd'][1]:.2f}) "
                 f"cov={e['cov']} "
@@ -594,6 +702,16 @@ class TriggerMonitor(Node):
         except TransformException as exc:
             return f"ERROR:{str(exc)[:160]}"
 
+    def _tf_timing(self, target, source):
+        """记录 TF 最新时间相对当前 ROS 时钟的偏差，定位 TF 停更/未来跳变。"""
+        try:
+            tf = self.tf_buffer.lookup_transform(target, source, Time())
+            stamp_ns = self._stamp_ns(tf.header.stamp)
+            age = (self.get_clock().now().nanoseconds - stamp_ns) / 1_000_000_000
+            return f"OK stamp={stamp_ns} age={age:+.3f}s"
+        except TransformException as exc:
+            return f"ERROR:{str(exc)[:140]}"
+
     def _scan_transform_status(self):
         if self.latest_scan is None:
             return "NO_SCAN"
@@ -606,6 +724,25 @@ class TriggerMonitor(Node):
             return "OK"
         except TransformException as exc:
             return f"ERROR:{str(exc)[:160]}"
+
+    def _scan_tf_timing(self, target, source):
+        """同时记录激光请求时间、TF 最新时间及精确查询结果。"""
+        if self.scan_stamp_ns is None or not source or source == "--":
+            return "NO_SCAN"
+        requested = Time(nanoseconds=self.scan_stamp_ns)
+        try:
+            latest = self.tf_buffer.lookup_transform(target, source, Time())
+            latest_ns = self._stamp_ns(latest.header.stamp)
+            lead = (self.scan_stamp_ns - latest_ns) / 1_000_000_000
+            latest_text = f"latest_age={lead:+.3f}s"
+        except TransformException as exc:
+            latest_text = f"latest=ERROR:{str(exc)[:100]}"
+        try:
+            self.tf_buffer.lookup_transform(target, source, requested)
+            exact = "exact=OK"
+        except TransformException as exc:
+            exact = f"exact=ERROR:{str(exc)[:120]}"
+        return f"req_age={self._age_text(self.scan_age)} {latest_text} {exact}"
 
     @staticmethod
     def _age_text(age):
@@ -782,6 +919,8 @@ def main(args=None):
         node = TriggerMonitor()
         print(f"\n>>> 监控日志: {node.log_path}\n", flush=True)
         rclpy.spin(node)
+    except (ExternalShutdownException, KeyboardInterrupt):
+        pass
     except Exception as e:
         print(f"[trigger_monitor] 崩溃: {type(e).__name__}: {e}", flush=True)
         import traceback

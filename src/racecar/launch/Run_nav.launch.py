@@ -61,25 +61,6 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='racecar',
-            executable='static_wall_scan_filter.py',
-            name='static_wall_scan_filter',
-            output='screen',
-            parameters=[{
-                'scan_topic': '/scan',
-                'filtered_topic': '/scan_nav',
-                'map_topic': '/map',
-                'map_frame': 'map',
-                'match_tolerance': 0.10,
-                'map_cell_radius': 1,
-                'occupied_threshold': 65,
-                'max_tf_age': 0.35,
-                'odom_frame': 'odom_combined',
-                'max_map_odom_age': 2.0,
-            }],
-        ),
-
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 [racecar_launchr, '/bringup_launch.py']),
