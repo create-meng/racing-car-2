@@ -11,7 +11,6 @@
 import cv2
 import glob
 import os
-import re
 import rclpy
 import subprocess
 import threading
@@ -32,7 +31,6 @@ class QRDecoderNode(Node):
         self.camera_index = self.get_parameter('camera_index').value
 
         self.publisher_ = self.create_publisher(String, '/qr_result', 10)
-        self.tts_publisher_ = self.create_publisher(String, '/tts_text', 10)
 
         # 先杀死已存在的图像发布节点（旧版 pub_image.py 会占用 USB 摄像头）
         self.kill_pub_image()
@@ -168,7 +166,12 @@ class QRDecoderNode(Node):
                 break
 
     def on_detected(self, content, source):
-        """两路共用：识别成功 → 发布结果与TTS → 标记完成（仅一次）。"""
+        """两路共用：识别成功 → 发布 /qr_result → 标记完成（仅一次）。
+
+        注意：不再发布 /tts_text 播报数字——数字+方向的语音统一由 h1.py 播报
+        （成功播"1234，顺时针/逆时针"，失败兜底播"顺时针/逆时针"），
+        避免 saoma 和 h1 各播一次数字导致"数字报两遍"。
+        """
         with self.done_lock:
             if self.done:  # 另一路已识别成功，忽略
                 return
@@ -179,16 +182,6 @@ class QRDecoderNode(Node):
         msg = String()
         msg.data = content
         self.publisher_.publish(msg)
-
-        tts_msg = String()
-        digits_only = re.sub(r'\D', '', content)
-        if digits_only:
-            tts_msg.data = digits_only
-            self.get_logger().info(f"发送数字到TTS: {tts_msg.data}")
-        else:
-            tts_msg.data = content
-            self.get_logger().info(f"发送原文到TTS: {tts_msg.data}")
-        self.tts_publisher_.publish(tts_msg)
 
     def find_camera_index(self):
         candidates = sorted(glob.glob('/dev/video*'))

@@ -142,7 +142,7 @@ controller_server:
       vx_std: 0.4               # 线速度采样噪声（探索程度）。调大→更敢试速度，易抖动；调小→速度平滑稳定
       vy_std: 0.0               # 横向速度采样噪声（阿克曼底盘必须 0）
       wz_std: 0.7               # 角速度采样噪声。调大→更敢转，易画龙；调小→转向稳定不绕圈
-      vx_max: 0.8               # 【最大线速度 m/s】主降速参数！调大→快但切弯/冲点，调小→稳但慢
+      vx_max: 0.75               # 【最大线速度 m/s】主降速参数！调大→快但切弯/冲点，调小→稳但慢（0.8→0.7 给动态避障留反应时间）
       vx_min: -0.6              # 【最小线速度（负=倒车）】允许倒车幅度；倒车需求少可设 -0.1
       vy_max: 0.0               # 横向速度上限（阿克曼必须 0）
       wz_max: 2.0               # 【最大角速度 rad/s】(2.0≈115°/s)。调大→掉头快但甩，调小→转向柔
@@ -179,8 +179,8 @@ controller_server:
         cost_power: 1
         cost_weight: 2.0        # 【前进偏好】调大→尽量不倒车（阿克曼倒车慢）；需要快速脱困可调小
       ObstaclesCritic:
-        repulsion_weight: 5.0   # 障碍斥力权重。调大→离障碍更远，路径绕
-        critical_weight: 20.0   # 致命区域权重。调大→宁绕路不靠近
+        repulsion_weight: 8.0   # 障碍斥力权重。调大→离障碍更远，路径绕（5.0→8.0 增强动态避障）
+        critical_weight: 30.0   # 致命区域权重。调大→宁绕路不靠近（20→30 对真障碍更坚决）
         consider_footprint: true  # 是否考虑 footprint 碰撞（true 更安全）
         collision_cost: 10000.0 # 碰撞代价（应远大于其他权重）
         collision_margin_distance: 0.09  # 碰撞判定边距（米）。调大→留更多安全间隙
@@ -226,7 +226,7 @@ local_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.35  # 【膨胀半径 米】障碍向外膨胀的距离。调大→车离障碍远（安全但挤不过窄道）
+        inflation_radius: 0.37  # 【膨胀半径 米】障碍向外膨胀的距离。调大→车离障碍远（安全但挤不过窄道）（0.35→0.37）
         cost_scaling_factor: 12.0  # 代价衰减速度。调大→膨胀衰减快（远处代价低）；调小→远处也有代价（更保守）
 
       obstacle_layer:
@@ -275,7 +275,7 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.35  # 【全局膨胀半径】调大→规划路径离障碍远（起点/终点贴障碍时易报 lethal！）
+        inflation_radius: 0.62  # 【全局膨胀半径】调大→规划路径离障碍远（起点/终点贴障碍时易报 lethal！）（0.6→0.62）
         cost_scaling_factor: 12.0
 
       static_layer:
@@ -294,7 +294,7 @@ global_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 5.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 3.0  # 【关键】实时动态障碍标记范围。车旁站人/放物→起点被标 lethal→规划失败！
+          obstacle_max_range: 4.5  # 【关键】实时动态障碍标记范围。3.0→4.5 与 local 一致：动态桶 4.5m 内即进全局图，规划绕开
                                    # 调小（如 1.5）→ 只标记很近的障碍；调大→更灵敏但易误判
           obstacle_min_range: 0.30
       always_send_full_costmap: true
@@ -335,7 +335,8 @@ planner_server:
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       tolerance: 1.5            # 终点容差（米）：终点被障碍包围时放宽到多远找解
-      allow_unknown: false      # 是否允许经过未知区域（false=严格按已知地图）
+      allow_unknown: true       # 是否允许经过未知区域（true=允许：地图未建图区域不再被当 lethal！
+                                # 之前 false 导致路点28附近"未知格子"被当障碍 → Starting point in lethal）
       max_iterations: 1000000   # 最大迭代（够大即可）
       max_on_approach_iterations: 1000  # 接近终点阶段的迭代上限
       max_planning_time: 1.0    # 【单次规划最大耗时 秒】调大→找更优路径但更慢
